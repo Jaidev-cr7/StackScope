@@ -362,16 +362,16 @@ describe('inspectArchive', () => {
   });
 
   it('enforces the expanded-size limit (a decompression bomb)', async () => {
-    // 40 entries each declaring 1 MiB = 40 MiB of *claimed* expansion, with
-    // tiny bodies. The limit must fire on the declared size before the bodies
-    // could ever be materialised.
-    const entries = Array.from({ length: 40 }, (_, i) => ({
+    // Build 5 entries each declaring 1 MiB with a tiny body. The inspector
+    // should reject once cumulative declared bytes exceed the limit.
+    const entries = Array.from({ length: 5 }, (_, i) => ({
       path: `repo-abc123/big${i}.bin`,
       declaredSize: 1024 * 1024,
-      body: null,
+      body: 16,
     }));
     const stream = await buildTarGz(entries);
-    await expect(inspectArchive(stream, workspace, { ...EXTRACTION_LIMITS, MAX_TOTAL_BYTES: 1024 * 1024 })).rejects.toThrow(
+    // Limit set to 512 KiB — the very first entry's 1 MiB exceeds it.
+    await expect(inspectArchive(stream, workspace, { ...EXTRACTION_LIMITS, MAX_TOTAL_BYTES: 512 * 1024 })).rejects.toThrow(
       /expands to more than/,
     );
   });

@@ -184,11 +184,16 @@ export async function inspectArchive(stream, targetDir, limits = EXTRACTION_LIMI
   });
 
   await new Promise((resolve, reject) => {
+    let settled = false;
     const abortWith = (error) => {
       failure = failure ?? wrapStreamError(error);
       stream.destroy?.();
       gunzip.destroy();
       parser.abort();
+      if (!settled) {
+        settled = true;
+        reject(failure);
+      }
     };
 
     // Count real decompressed bytes. This is what actually stops a gzip bomb:
@@ -209,6 +214,8 @@ export async function inspectArchive(stream, targetDir, limits = EXTRACTION_LIMI
     parser.on('error', abortWith);
 
     gunzip.on('end', () => {
+      if (settled) return;
+      settled = true;
       if (failure) reject(failure);
       else {
         parser.end();
@@ -298,11 +305,31 @@ export async function extractStreamTo(streamFactory, targetDir, { limits = EXTRA
   await mkdir(staging, { recursive: true, mode: 0o700 });
 
   try {
-    // `await` so a factory that is async (and therefore natural when it has to
-    // start an HTTP request) is supported as well as a sync one.
+    // --- Pass 1: validate every entry without writing anything. ---------------
     const inspectStream = await streamFactory();
-    const { stats } = await inspectArchive(inspectStream, staging, limits);
+    const { stats, allowed } = await inspectArchive(inspectStream, staging, limits);
     inspectStream.destroy?.();
+
+    // --- Pass 2: extract allowed entries into the staging directory. ----------
+    const extractStream = await streamFactory();
+    await new Promise((resolve, reject) => {
+      const gunzip = createGunzip();
+      const unpack = extract({
+        cwd: staging,
+        strip: 0,
+        noChmod: true,
+        preservePaths: false,
+        filter: (entryPath) => allowed.has(entryPath.replace(/\\/g, '/')),
+        onwarn: () => {},
+      });
+
+      extractStream.on('error', (err) => reject(wrapStreamError(err)));
+      gunzip.on('error', (err) => reject(wrapStreamError(err)));
+      unpack.on('error', (err) => reject(wrapStreamError(err)));
+      unpack.on('finish', resolve);
+      extractStream.pipe(gunzip).pipe(unpack);
+    });
+    extractStream.destroy?.();
 
     let entries = [];
     try {

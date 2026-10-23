@@ -76,9 +76,15 @@ export async function createWorkspace({ root = config.sandboxRoot, label = 'run'
  * directory being removed, the removal is refused - that is what stops a
  * delayed cleanup from deleting a different run's checkout.
  */
-export async function removeWorkspace(workspaceRoot, idOrPath, { expectedId = null } = {}) {
+export async function removeWorkspace(workspaceRoot, idOrPath, { expectedId } = {}) {
+  if (!expectedId) {
+    throw new SandboxError(
+      'removeWorkspace requires expectedId to prevent accidental cross-run deletion',
+      'EXPECTED_ID_REQUIRED',
+    );
+  }
   const resolved = await resolveWorkspace(workspaceRoot, idOrPath);
-  if (expectedId && path.basename(resolved) !== expectedId) {
+  if (path.basename(resolved) !== expectedId) {
     throw new SandboxError(
       `Refusing to remove ${resolved}: expected workspace ${expectedId}`,
       'WORKSPACE_ID_MISMATCH',
