@@ -1,0 +1,23 @@
+{
+  "name": "ci-investigator",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Investigate failed CI runs with an AI agent whose evidence and patches are verified by the backend.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "setup": "npm run install:all && npm run seed",
+    "install:all": "npm --prefix backend install && npm --prefix frontend install",
+    "seed": "node fixtures/scripts/seed.js",
+    "fixtures:check": "node fixtures/scripts/check.js",
+    "dev:backend": "npm --prefix backend run dev",
+    "dev:frontend": "npm --prefix frontend run dev",
+    "test": "npm run test:backend && npm run test:frontend",
+    "test:backend": "npm --prefix backend test",
+    "test:frontend": "npm --prefix frontend test",
+    "eval": "node eval/run-eval.js",
+    "check:all": "node scripts/check-all.js"
+  }
+}

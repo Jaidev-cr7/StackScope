@@ -1,0 +1,91 @@
+{
+  "_note": "Hand-written ground truth for the 8 fixtures. Written from reading the fixture source, never derived from the agent's output. The agent and the sandbox never read this file. 'signatureMustContain' is a literal string that must appear in the fixture's `node --test` output, so the seed check fails loudly if a fixture stops failing for the reason we intended. 'rootCauseFile' is the file a correct patch must change, which is NOT always the file named in the first stack frame.",
+  "01-logic-bug": {
+    "kind": "logic_bug",
+    "errorName": "AssertionError",
+    "signatureMustContain": "350 !== 1200",
+    "expectedStatus": "COMPLETED",
+    "rootCauseFile": "src/cart.js",
+    "rootCauseLine": 5,
+    "firstFrameFile": "test/cart.test.js",
+    "rootCause": "cartTotal() adds item.price without multiplying by item.quantity, so a cart of two widgets and two gizmos totals 350 instead of 1200. The assertion at test/cart.test.js:10 is correct; the source is wrong.",
+    "fixSummary": "Multiply price by quantity: sum += item.price * item.quantity."
+  },
+  "02-missing-dependency": {
+    "kind": "missing_dependency",
+    "errorName": "Error",
+    "signatureMustContain": "Cannot find package 'tiny-slugify'",
+    "expectedStatus": "COMPLETED",
+    "rootCauseFile": "src/slug.js",
+    "rootCauseLine": 1,
+    "firstFrameFile": "src/slug.js",
+    "rootCause": "src/slug.js imports 'tiny-slugify', which is not installed and is not a Node built-in, so ESM resolution fails with ERR_MODULE_NOT_FOUND before the test ever runs.",
+    "fixSummary": "Drop the dependency and implement slugify locally: lowercase, replace non-alphanumeric runs with a single dash, trim leading/trailing dashes."
+  },
+  "03-syntax-error": {
+    "kind": "syntax_error",
+    "errorName": "SyntaxError",
+    "signatureMustContain": "SyntaxError: Unexpected end of input",
+    "expectedStatus": "COMPLETED",
+    "rootCauseFile": "src/tokenizer.js",
+    "rootCauseLine": 9,
+    "firstFrameFile": "src/tokenizer.js",
+    "rootCause": "tokenize() is missing its closing brace, so the module never parses. Node reports the error against src/tokenizer.js with no usable stack frame because the file could not be compiled.",
+    "fixSummary": "Add the closing brace for tokenize() after the return statement."
+  },
+  "04-undefined-variable": {
+    "kind": "reference_error",
+    "errorName": "ReferenceError",
+    "signatureMustContain": "ReferenceError: maximum is not defined",
+    "expectedStatus": "COMPLETED",
+    "rootCauseFile": "src/stats.js",
+    "rootCauseLine": 7,
+    "firstFrameFile": "src/stats.js",
+    "rootCause": "range() returns maximum - minimum but neither identifier is declared or imported in src/stats.js, so calling it throws a ReferenceError at src/stats.js:7.",
+    "fixSummary": "Compute the range from the argument: return Math.max(...values) - Math.min(...values)."
+  },
+  "05-missing-config-key": {
+    "kind": "missing_config_key",
+    "errorName": "TypeError",
+    "signatureMustContain": "Cannot read properties of undefined (reading 'port')",
+    "expectedStatus": "COMPLETED",
+    "rootCauseFile": "config.json",
+    "rootCauseLine": 1,
+    "firstFrameFile": "src/server.js",
+    "rootCause": "config.json only defines a 'database' section, so config.server is undefined and serverPort() throws a TypeError when reading .port. The stack frame points at src/server.js:4, but the file that must change is config.json: it is missing the 'server' section that the code expects.",
+    "fixSummary": "Add a server section to config.json containing the port 8080."
+  },
+  "06-broken-import": {
+    "kind": "broken_import",
+    "errorName": "SyntaxError",
+    "signatureMustContain": "does not provide an export named 'formatSize'",
+    "expectedStatus": "COMPLETED",
+    "rootCauseFile": "src/report.js",
+    "rootCauseLine": 1,
+    "firstFrameFile": "src/report.js",
+    "rootCause": "format.js exports formatBytes after a rename, but src/report.js still imports the old name formatSize, so the ES module link fails before the module body runs.",
+    "fixSummary": "Import formatBytes instead of formatSize in src/report.js and call it under that name."
+  },
+  "07-wrong-test-expectation": {
+    "kind": "wrong_test_expectation",
+    "errorName": "AssertionError",
+    "signatureMustContain": "'ACTIVE' !== 'LIVE'",
+    "expectedStatus": "COMPLETED",
+    "rootCauseFile": "test/status.test.js",
+    "rootCauseLine": 10,
+    "firstFrameFile": "test/status.test.js",
+    "rootCause": "src/status.js is correct and documented: labelFor returns the status name upper-cased, and 'active' upper-cases to 'ACTIVE'. The test still expects 'LIVE', a label from before the statuses were renamed, so the expectation is stale and the test is what must change.",
+    "fixSummary": "Change the expected label in test/status.test.js from 'LIVE' to 'ACTIVE'."
+  },
+  "08-undiagnosable": {
+    "kind": "undiagnosable",
+    "errorName": "TypeError",
+    "signatureMustContain": "ECONNREFUSED",
+    "expectedStatus": "INCONCLUSIVE",
+    "rootCauseFile": null,
+    "rootCauseLine": null,
+    "firstFrameFile": "src/sync.js",
+    "rootCause": "The test depends on an internal records service that does not exist in the sandbox. The failure is TypeError: fetch failed caused by ECONNREFUSED, and every frame in the trace is either a Node internal or the correct call site itself. Nothing in the repository is wrong and no change to repository code can make this pass, so the honest outcome is INCONCLUSIVE.",
+    "fixSummary": null
+  }
+}
