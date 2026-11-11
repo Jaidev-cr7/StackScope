@@ -15,7 +15,14 @@ const logsDir = path.join(repoRoot, 'fixtures', 'logs');
 const FIXTURE_CHECKOUT = path.join(repoRoot, 'fixtures', 'repos');
 
 let logs = {};
-let expected = {};
+
+// The ground truth is loaded at module scope, not in `beforeAll`. `it.each`
+// is evaluated while the test file is being collected - before any hook runs -
+// so a fixture list read in `beforeAll` would be empty and the whole block
+// would silently register zero test cases.
+const expected = JSON.parse(
+  await readFile(path.join(repoRoot, 'fixtures', 'expected.json'), 'utf8'),
+);
 
 beforeAll(async () => {
   const entries = await readdir(logsDir);
@@ -23,7 +30,6 @@ beforeAll(async () => {
     const id = entry.replace(/\.log$/, '');
     logs[id] = await readFile(path.join(logsDir, entry), 'utf8');
   }
-  expected = JSON.parse(await readFile(path.join(repoRoot, 'fixtures', 'expected.json'), 'utf8'));
 });
 
 function rootsFor(id) {

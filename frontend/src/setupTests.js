@@ -1,7 +1,13 @@
-// Vitest setup. `globals: false` means Testing Library's automatic cleanup does
-// not hook itself up (it looks for a global afterEach), so we register it here
-// explicitly - otherwise mounted trees leak between tests.
-import '@testing-library/jest-dom';
+// Vitest setup.
+//
+// `globals: false` means there is no global `expect`, so jest-dom's matchers
+// are registered through its Vitest entry point rather than its default one -
+// the default build expects a global `expect` to already exist.
+//
+// The automatic cleanup that Testing Library does for you also looks for a
+// global `afterEach`, so it is registered explicitly here. Without it, mounted
+// trees leak from one test into the next.
+import '@testing-library/jest-dom/vitest';
 import { afterEach } from 'vitest';
 import { cleanup } from '@testing-library/react';
 

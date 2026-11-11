@@ -31,9 +31,22 @@ const PYTHON_FRAME = /^\s*File\s+"(?<loc>[^"]+)",\s+line\s+(?<line>\d+)/;
 const LOCATION_RE = /^(?<path>.+?):(?<line>\d+)(?::(?<column>\d+))?$/;
 
 // `AssertionError [ERR_ASSERTION]: message`, `TypeError: message`,
-// `org.gradle.api.GradleException: message`, `FAILED: message`.
+// `Error [ERR_MODULE_NOT_FOUND]: message`, `org.gradle.api.GradleException: message`.
+//
+// The name may be a bare `Error`/`Exception` (Node prints exactly that for a
+// failed module resolution) or a longer name that ends in one. Both forms
+// matter: a header that does not match is a failure the analyser cannot
+// describe at all.
 const ERROR_HEADER_RE =
-  /^\s*(?<name>[A-Za-z_$][\w$.]*(?:Error|Exception|Failure|Fault|Warning))\s*(?:\[(?<code>[A-Z0-9_]+)\])?\s*:\s*(?<message>.*)$/;
+  /^\s*(?<name>(?:[A-Za-z_$][\w$.]*)?(?:Error|Exception|Failure|Fault|Warning))\s*(?:\[(?<code>[A-Z0-9_]+)\])?\s*:\s*(?<message>.*)$/;
+
+// Node prints a wrapped error's cause on its own line:
+//     [cause]: Error: connect ECONNREFUSED 127.0.0.1:45999
+// The cause is where the real reason usually is.
+const CAUSE_RE = /^\s*(?:\[cause\]|cause)\s*:\s*(?<cause>.+)$/;
+
+// An error code inside the cause, e.g. `ECONNREFUSED` or `ERR_MODULE_NOT_FOUND`.
+const ERROR_CODE_TOKEN_RE = /\b(?<code>[A-Z][A-Z0-9_]{3,})\b/;
 
 const NODE_INTERNAL_RE = /^node:/;
 
@@ -196,10 +209,57 @@ function extractErrorHeader(lines) {
       name: match.groups.name,
       code: match.groups.code ?? null,
       message: messageParts.join('\n').trim(),
+      cause: extractCause(lines, i),
       index: i,
     };
   }
   return null;
+}
+
+/**
+ * Find the cause of a wrapped error.
+ *
+ * Node prints it a few lines below the header:
+ *
+ *     TypeError: fetch failed
+ *         at ...
+ *       [cause]: Error: connect ECONNREFUSED 127.0.0.1:45999
+ *
+ * Without the cause, "fetch failed" is a signature that says almost nothing.
+ * With it, the same failure reads as a connection that was refused - which is
+ * a completely different remedy.
+ */
+function extractCause(lines, headerIndex) {
+  for (let i = headerIndex + 1; i < lines.length && i < headerIndex + 24; i += 1) {
+    const match = lines[i].match(CAUSE_RE);
+    if (match) return match.groups.cause.trim();
+  }
+  return null;
+}
+
+/** The error code inside a cause line, if there is one. */
+function causeCode(cause) {
+  if (!cause) return null;
+  const match = cause.match(ERROR_CODE_TOKEN_RE);
+  return match ? match.groups.code : null;
+}
+
+/**
+ * Replace checkout paths in a message with repository-relative ones.
+ *
+ * A message that embeds an absolute path is not a stable signature: the same
+ * failure on another machine would produce a different string, and the
+ * ground truth in `fixtures/expected.json` would stop matching.
+ */
+function relativizeMessage(message, roots) {
+  if (!message) return message;
+  let out = String(message);
+  for (const root of roots) {
+    if (!root) continue;
+    const normalised = String(root).replace(/\/+$/, '');
+    out = out.split(`${normalised}/`).join('');
+  }
+  return out;
 }
 
 /** Pull `test at file:line:col` + test name pairs out of a spec-style report. */
@@ -260,12 +320,12 @@ export function analyzeFailure(rawLog, { roots = [] } = {}) {
   const failingTests = extractFailingTests(lines, roots);
 
   const errorName = header?.name ?? guessErrorName(lines);
-  const message = header?.message ?? '';
+  const message = relativizeMessage(header?.message ?? '', roots);
 
   // The signature is what the fixtures' expected.json is checked against, so it
   // has to be stable and literal: `TypeError: Cannot read properties of
   // undefined (reading 'port')`.
-  const signature = buildSignature(errorName, message, frames);
+  const signature = buildSignature(errorName, message, frames, header?.cause ?? null);
 
   const category = classifyFailure(text);
 
@@ -311,9 +371,28 @@ function guessErrorName(lines) {
   return 'UnknownError';
 }
 
-function buildSignature(errorName, message, frames) {
-  const firstLine = String(message ?? '').split('\n')[0].trim();
-  if (firstLine) return `${errorName}: ${firstLine}`;
+function buildSignature(errorName, message, frames, cause = null) {
+  const lines = String(message ?? '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const firstLine = lines[0] ?? '';
+
+  // The cause code, when the error wraps one: "fetch failed" on its own says
+  // nothing, "fetch failed [ECONNREFUSED]" says what to fix.
+  const wrappedCode = causeCode(cause);
+  const suffix = wrappedCode ? ` [${wrappedCode}]` : '';
+
+  if (firstLine) {
+    let signature = `${errorName}: ${firstLine}${suffix}`;
+    // A message that ends in a colon is a lead-in ("Expected values to be
+    // strictly equal:"), and the line after it is the part that identifies the
+    // failure ("350 !== 1200").
+    if (firstLine.endsWith(':') && lines[1]) {
+      signature = `${signature} ${lines[1]}`;
+    }
+    return signature;
+  }
 
   // No message: fall back to the code, then to the first frame location.
   const coded = frames[0]?.code;

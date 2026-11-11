@@ -43,23 +43,31 @@ const loginSchema = z.object({
 
 // Auth endpoints are the credential-stuffing surface, so they get a tighter
 // limiter than the rest of the API.
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  limit: 20,
-  standardHeaders: 'draft-7',
-  legacyHeaders: false,
-  message: { error: 'too_many_requests', message: 'Too many attempts. Try again later.' },
-});
+//
+// The limits are parameters rather than constants so a test can build a
+// limiter with a small limit (and prove that it fires) without the rest of
+// the suite tripping over the real one.
+export function createAuthLimiters({ login = 20, register = 10 } = {}) {
+  return {
+    authLimiter: rateLimit({
+      windowMs: 15 * 60 * 1000,
+      limit: login,
+      standardHeaders: 'draft-7',
+      legacyHeaders: false,
+      message: { error: 'too_many_requests', message: 'Too many attempts. Try again later.' },
+    }),
+    registerLimiter: rateLimit({
+      windowMs: 60 * 60 * 1000,
+      limit: register,
+      standardHeaders: 'draft-7',
+      legacyHeaders: false,
+      message: { error: 'too_many_requests', message: 'Too many accounts created from this address.' },
+    }),
+  };
+}
 
-const registerLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000,
-  limit: 10,
-  standardHeaders: 'draft-7',
-  legacyHeaders: false,
-  message: { error: 'too_many_requests', message: 'Too many accounts created from this address.' },
-});
-
-export function authRoutes({ db = getDb() } = {}) {
+export function authRoutes({ db = getDb(), limiters = createAuthLimiters() } = {}) {
+  const { authLimiter, registerLimiter } = limiters;
   const router = Router();
 
   router.post('/register', registerLimiter, async (req, res) => {
@@ -135,4 +143,3 @@ export function authRoutes({ db = getDb() } = {}) {
   return router;
 }
 
-export { authLimiter };

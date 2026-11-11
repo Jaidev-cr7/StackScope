@@ -41,6 +41,12 @@ const steps = [
     needs: 'frontend/src/setupTests.js',
   },
   {
+    name: 'frontend builds',
+    command: 'npm',
+    args: ['--prefix', 'frontend', 'run', 'build'],
+    needs: 'frontend/src/main.jsx',
+  },
+  {
     name: 'evaluation across fixtures',
     command: process.execPath,
     args: ['eval/run-eval.js'],
