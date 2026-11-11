@@ -11,13 +11,19 @@
 //     keys never makes a network call it did not ask for.
 //   - `ALLOW_REPO_EXECUTION` defaults to `false`. Running repository code is
 //     opt-in twice: once here, once per run in the UI.
-import 'dotenv/config';
-import { z } from 'zod';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import dotenv from 'dotenv';
+import { z } from 'zod';
 
 export const backendRoot = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 export const repoRoot = path.resolve(backendRoot, '..');
+
+// The environment file is loaded from an absolute path rather than through
+// `dotenv/config`, which reads `.env` from the *current working directory`.
+// The backend is started from the repository root, from `backend/`, and from
+// a test runner; only an absolute path is the same file in all three.
+dotenv.config({ path: path.join(backendRoot, '.env') });
 
 // Placeholders that must never reach production as a real secret.
 const INSECURE_SECRETS = new Set([

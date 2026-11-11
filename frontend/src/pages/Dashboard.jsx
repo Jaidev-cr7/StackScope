@@ -16,9 +16,10 @@ import { displaySource, errorMessage, formatRelative } from '../utils/format.js'
 function NewInvestigation({ fixtures, onCreated }) {
   const queryClient = useQueryClient();
   const [fixtureId, setFixtureId] = useState('');
+  const [allowExecution, setAllowExecution] = useState(false);
 
   const createRun = useMutation({
-    mutationFn: (id) => api.post('/runs', { fixtureId: id }),
+    mutationFn: (id) => api.post('/runs', { fixtureId: id, allowExecution }),
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['runs'] });
       onCreated?.(data?.run);
@@ -27,38 +28,53 @@ function NewInvestigation({ fixtures, onCreated }) {
 
   return (
     <form
-      className="row"
+      className="stack"
       onSubmit={(event) => {
         event.preventDefault();
         if (fixtureId) createRun.mutate(fixtureId);
       }}
     >
-      <div className="field" style={{ flex: 1 }}>
-        <label className="field__label" htmlFor="new-run-fixture">
-          Fixture to investigate
-        </label>
-        <select
-          id="new-run-fixture"
-          className="select"
-          value={fixtureId}
-          onChange={(event) => setFixtureId(event.target.value)}
+      <div className="row">
+        <div className="field" style={{ flex: 1 }}>
+          <label className="field__label" htmlFor="new-run-fixture">
+            Fixture to investigate
+          </label>
+          <select
+            id="new-run-fixture"
+            className="select"
+            value={fixtureId}
+            onChange={(event) => setFixtureId(event.target.value)}
+          >
+            <option value="">Choose a failing project…</option>
+            {fixtures.map((fixture) => (
+              <option key={fixture.id} value={fixture.id}>
+                {fixture.title}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <button
+          type="submit"
+          className="btn btn--primary"
+          disabled={!fixtureId || createRun.isPending}
         >
-          <option value="">Choose a failing project…</option>
-          {fixtures.map((fixture) => (
-            <option key={fixture.id} value={fixture.id}>
-              {fixture.title}
-            </option>
-          ))}
-        </select>
+          {createRun.isPending ? 'Starting…' : 'Start investigation'}
+        </button>
       </div>
 
-      <button
-        type="submit"
-        className="btn btn--primary"
-        disabled={!fixtureId || createRun.isPending}
-      >
-        {createRun.isPending ? 'Starting…' : 'Start investigation'}
-      </button>
+      <label className="checkbox" htmlFor="new-run-execution">
+        <input
+          id="new-run-execution"
+          type="checkbox"
+          checked={allowExecution}
+          onChange={(event) => setAllowExecution(event.target.checked)}
+        />
+        <span>
+          Run this project&apos;s test command to verify a patch. Without it the run can
+          analyse the failure but cannot prove a fix.
+        </span>
+      </label>
 
       {createRun.isError ? (
         <p className="field__error" role="alert">

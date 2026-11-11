@@ -35,8 +35,11 @@ import * as patches from './db/repos/patches.js';
 import * as jobsRepo from './db/repos/jobs.js';
 import { createWorkspace, removeWorkspace, newWorkspaceLabel } from './sandbox/workspace.js';
 import { analyzeFailure } from './analysis/failure.js';
-import { buildOfflineDiagnosis } from './agent/offlineReasoner.js';
+import { createProvider } from './agent/provider.js';
 import { validateCitations } from './agent/citations.js';
+import { verifyDiff } from './patch/verify.js';
+import { reason as reasonFor } from './domain/patchStatus.js';
+import { createCheckoutReader } from './sandbox/checkout.js';
 import { fixtureRepoPath, fixtureLogPath } from './fixtures/catalog.js';
 
 /** Append a timeline entry and the matching event in one place. */
@@ -52,6 +55,15 @@ function record(db, { runId, userId, kind, title, detail = null, status = 'ok', 
   });
   events.appendEvent(db, { runId, userId, type: eventType ?? `step.discovered`, payload: payload ?? { kind, title, status } });
   return step;
+}
+
+/** The first step of a given kind, in order. */
+function findStep(db, runId, kind) {
+  return (
+    db
+      .prepare('SELECT * FROM steps WHERE run_id = ? AND kind = ? ORDER BY seq ASC LIMIT 1')
+      .get(runId, kind) ?? null
+  );
 }
 
 /** Move the run to a new state and tell every listener about it. */
@@ -76,11 +88,20 @@ export async function investigateRun(db, { runId, userId, overrides = {} }) {
 
   const sourceType = run.source_type;
   const sourceRef = run.source_ref;
+
+  // A fixture's checkout and log are materialised on disk. A GitHub run's
+  // were downloaded and stored with the run, so they are read back from the
+  // run's own steps.
+  const importedSource = sourceType === 'fixture' ? null : findStep(db, runId, 'imported_source');
+  const importedLog = sourceType === 'fixture' ? null : findStep(db, runId, 'log');
+
   // `overrides` lets a test point the worker at its own checkout and log
   // instead of the fixture material, so the pipeline can be tested without
   // depending on generated artefacts.
-  const sourceDir = overrides.sourceDir ?? fixtureRepoPath(sourceRef);
-  const logFile = overrides.logPath ?? fixtureLogPath(sourceRef);
+  const sourceDir =
+    overrides.sourceDir ??
+    (sourceType === 'fixture' ? fixtureRepoPath(sourceRef) : importedSource?.detail);
+  const logFile = overrides.logPath ?? (sourceType === 'fixture' ? fixtureLogPath(sourceRef) : null);
 
   transition(db, { runId, userId, state: 'QUEUED' });
   record(db, { runId, userId, kind: 'queue', title: 'Investigation queued', detail: sourceRef });
@@ -90,8 +111,8 @@ export async function investigateRun(db, { runId, userId, overrides = {} }) {
   // --- 1. check the source out -------------------------------------------------
   let workspace = null;
   try {
-    if (sourceType !== 'fixture') {
-      throw new Error(`Source type "${sourceType}" cannot be imported yet.`);
+    if (!sourceDir) {
+      throw new Error(`No source is available for this run (source type "${sourceType}").`);
     }
 
     workspace = await createWorkspace({ root: config.sandboxRoot, label: newWorkspaceLabel(runId) });
@@ -123,13 +144,20 @@ export async function investigateRun(db, { runId, userId, overrides = {} }) {
     transition(db, { runId, userId, state: 'INVESTIGATING' });
     events.appendEvent(db, { runId, userId, type: 'agent.started', payload: { mode: config.llm.mode } });
 
-    let logText;
-    try {
-      logText = await readFile(logFile, 'utf8');
-    } catch {
-      throw new Error(
-        `No captured log for "${sourceRef}". Run "npm run fixtures:capture" to generate it.`,
-      );
+    let logText = null;
+    if (logFile) {
+      try {
+        logText = await readFile(logFile, 'utf8');
+      } catch {
+        throw new Error(
+          `No captured log for "${sourceRef}". Run "npm run fixtures:capture" to generate it.`,
+        );
+      }
+    } else if (importedLog?.detail) {
+      logText = importedLog.detail;
+    }
+    if (!logText) {
+      throw new Error(`No CI log is available for "${sourceRef}".`);
     }
 
     events.appendEvent(db, { runId, userId, type: 'log.ready', payload: { bytes: logText.length } });
@@ -158,7 +186,29 @@ export async function investigateRun(db, { runId, userId, overrides = {} }) {
     });
 
     // --- 4. diagnose, and check every claim ------------------------------------
-    const diagnosis = await buildOfflineDiagnosis({ analysis, checkoutRoot: workspace.repo });
+    // The provider proposes; the citation validator decides whether the
+    // proposal is backed by the code. A live model gets no special trust: its
+    // citations go through exactly the same check.
+    const reader = createCheckoutReader(workspace.repo);
+    const files = await reader.listFiles();
+
+    const provider = createProvider();
+    const proposal = await provider.diagnose({
+      analysis,
+      checkoutRoot: workspace.repo,
+      logText,
+      files,
+      sourceRef,
+      model: config.llm.model,
+      readFile: reader.readFile,
+      listFiles: reader.listFiles,
+      searchFiles: reader.searchFiles,
+    });
+
+    const diagnosis = {
+      ...proposal,
+      citations: proposal.citations ?? [],
+    };
     const evidence = await validateCitations(diagnosis.citations, { checkoutRoot: workspace.repo });
 
     const stored = {
@@ -199,25 +249,80 @@ export async function investigateRun(db, { runId, userId, overrides = {} }) {
       payload: { category: stored.category, evidenceSupported: stored.evidence.supported },
     });
 
-    // --- 5. record the (non-)patch ---------------------------------------------
-    // The offline reasoner localises a fault but does not write code, so there
-    // is no patch to verify. The record says exactly that, and its status is
-    // UNVERIFIED - the honest answer when nothing was executed.
-    const patch = patches.createPatch(db, {
-      runId,
-      diff: null,
-      files: [],
-      status: 'UNVERIFIED',
-      reason:
-        'No patch was proposed. The offline reasoner localises the fault and cites the evidence; only the live model proposes code, and only the verification service can mark a patch VERIFIED.',
-      runner: 'none',
-      citations: stored.citations,
-    });
+    // --- 5. verify the proposed patch -------------------------------------------
+    // If the provider proposed a diff, it is put to the only test that
+    // matters: run the project's own command before the patch and after it.
+    // If it did not, the record says so and the status is UNVERIFIED - the
+    // honest answer when nothing was executed.
+    let patchRecord;
+    if (proposal.patch) {
+      events.appendEvent(db, {
+        runId,
+        userId,
+        type: 'verification.started',
+        payload: { hasPatch: true },
+      });
+
+      const verification = await verifyDiff({
+        checkoutRoot: workspace.repo,
+        diffText: proposal.patch,
+        executionAllowed: Boolean(run.allow_execution),
+        globalExecutionAllowed: overrides.globalExecutionAllowed ?? config.execution.allowed,
+      });
+
+      patchRecord = patches.createPatch(db, {
+        runId,
+        diff: proposal.patch,
+        files: verification.files ?? [],
+        status: verification.status,
+        reason: verification.reason,
+        runner: verification.runner,
+        citations: stored.citations,
+      });
+      patches.updatePatchVerification(db, patchRecord.id, {
+        status: verification.status,
+        reason: verification.reason,
+        baseline: verification.baseline,
+        patched: verification.patched,
+        runner: verification.runner,
+      });
+
+      runs.saveVerification(db, userId, runId, {
+        status: verification.status,
+        reason: verification.reason,
+      });
+
+      events.appendEvent(db, {
+        runId,
+        userId,
+        type: 'verification.result',
+        payload: { status: verification.status, reasonCode: verification.reasonCode },
+      });
+      record(db, {
+        runId,
+        userId,
+        kind: 'verification',
+        title: `Patch ${verification.status}`,
+        detail: verification.reason,
+        status: verification.status === 'VERIFIED' ? 'ok' : 'failed',
+      });
+    } else {
+      patchRecord = patches.createPatch(db, {
+        runId,
+        diff: null,
+        files: [],
+        status: 'UNVERIFIED',
+        reason: reasonFor('NO_PATCH'),
+        runner: 'none',
+        citations: stored.citations,
+      });
+    }
+
     events.appendEvent(db, {
       runId,
       userId,
       type: 'patch.ready',
-      payload: { patchId: patch.id, status: patch.status },
+      payload: { patchId: patchRecord.id, status: patchRecord.status },
     });
 
     transition(db, {

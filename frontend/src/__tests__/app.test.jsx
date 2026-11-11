@@ -173,7 +173,40 @@ describe('the dashboard', () => {
       const post = calls.find((call) => call.init?.method === 'POST');
       expect(post).toBeDefined();
       expect(post.url).toBe('/api/runs');
-      expect(JSON.parse(post.init.body)).toEqual({ fixtureId: '01-logic-bug' });
+      // The execution consent is part of the request: without it the run can
+      // analyse the failure but never verify a fix.
+      expect(JSON.parse(post.init.body)).toEqual({
+        fixtureId: '01-logic-bug',
+        allowExecution: false,
+      });
+    });
+  });
+
+  it('sends the execution consent when it is given', async () => {
+    const { calls } = stubBackend({
+      ...signedIn,
+      '/api/runs': (init) => {
+        if (init?.method === 'POST') {
+          return { run: { id: 'run-3', state: 'CREATED', sourceRef: '01-logic-bug' } };
+        }
+        return signedIn['/api/runs']();
+      },
+    });
+
+    renderApp({ route: '/' });
+
+    await screen.findByRole('heading', { name: 'Investigations' });
+    await userEvent.selectOptions(
+      await screen.findByLabelText('Fixture to investigate'),
+      '01-logic-bug',
+    );
+    await userEvent.click(screen.getByLabelText(/Run this project/));
+    await userEvent.click(screen.getByRole('button', { name: 'Start investigation' }));
+
+    await waitFor(() => {
+      const post = calls.find((call) => call.init?.method === 'POST');
+      expect(post).toBeDefined();
+      expect(JSON.parse(post.init.body).allowExecution).toBe(true);
     });
   });
 

@@ -29,11 +29,24 @@ import * as jobs from '../db/repos/jobs.js';
 import { fromJson } from '../db/repos/helpers.js';
 import { logger } from '../logger.js';
 import { listFixtures, findFixture } from '../fixtures/catalog.js';
+import { importWorkflowRun } from '../github/import.js';
+import { GitHubError } from '../github/client.js';
 import { ApiError } from '../http/errors.js';
 
-const createRunSchema = z.object({
-  fixtureId: z.string().trim().min(1, 'Pick a fixture to investigate.'),
-});
+const createRunSchema = z
+  .object({
+    // Exactly one source: a fixture to investigate, or a real GitHub run.
+    fixtureId: z.string().trim().min(1).optional(),
+    runUrl: z.string().trim().min(1).optional(),
+    // Running the checkout's own code is a separate decision from starting an
+    // investigation, and it is the user's to make. Without it a run can
+    // analyse a failure but never verify a fix.
+    allowExecution: z.boolean().default(false),
+  })
+  .refine((value) => Boolean(value.fixtureId || value.runUrl), {
+    message: 'Pick a fixture to investigate, or paste the URL of a failed GitHub Actions run.',
+    path: ['fixtureId'],
+  });
 
 const listQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(50),
@@ -76,25 +89,77 @@ export function runRoutes({ db = getDb() } = {}) {
         throw ApiError.badRequest('invalid_input', parsed.error.issues[0]?.message ?? 'Invalid input.', parsed.error.issues);
       }
 
-      const fixture = await findFixture(parsed.data.fixtureId);
-      if (!fixture) {
-        throw ApiError.badRequest('unknown_fixture', 'That fixture does not exist.');
-      }
+      // --- the source ------------------------------------------------------------
+      // A fixture is local; a GitHub run has to be fetched. The fetch happens
+      // here rather than in the worker so that a failure to import is
+      // reported to the person who asked for it, instead of a run that fails
+      // silently in the background.
+      let run;
+      let jobPayload = {};
 
-      const run = runs.createRun(db, {
-        userId: req.userId,
-        sourceType: 'fixture',
-        sourceRef: fixture.id,
-        repository: `fixtures/${fixture.id}`,
-        workflowName: 'fixture tests',
-        state: 'CREATED',
-      });
+      if (parsed.data.runUrl) {
+        const imported = await importWorkflowRun({ runUrl: parsed.data.runUrl });
+
+        run = runs.createRun(db, {
+          userId: req.userId,
+          sourceType: 'github',
+          sourceRef: imported.workflowRun.htmlUrl ?? parsed.data.runUrl,
+          repository: `${imported.owner}/${imported.repo}`,
+          commitSha: imported.workflowRun.headSha ?? null,
+          workflowRunId: imported.workflowRunId,
+          workflowName: imported.workflowRun.name ?? null,
+          workflowStatus: imported.workflowRun.status ?? null,
+          workflowConclusion: imported.workflowRun.conclusion ?? null,
+          jobName: imported.job.name ?? null,
+          jobId: imported.job.id ?? null,
+          state: 'CREATED',
+          allowExecution: parsed.data.allowExecution,
+        });
+
+        // The downloaded checkout and the log are stored with the run, so the
+        // worker does not have to know where they came from.
+        steps.addStep(db, {
+          runId: run.id,
+          userId: req.userId,
+          seq: steps.nextSeq(db, run.id),
+          kind: 'imported_source',
+          title: 'Source downloaded',
+          detail: imported.checkoutPath,
+        });
+        steps.addStep(db, {
+          runId: run.id,
+          userId: req.userId,
+          seq: steps.nextSeq(db, run.id),
+          kind: 'log',
+          title: 'CI log downloaded',
+          detail: imported.logText,
+        });
+
+        jobPayload = { runUrl: parsed.data.runUrl, owner: imported.owner, repo: imported.repo };
+      } else {
+        const fixture = await findFixture(parsed.data.fixtureId);
+        if (!fixture) {
+          throw ApiError.badRequest('unknown_fixture', 'That fixture does not exist.');
+        }
+
+        run = runs.createRun(db, {
+          userId: req.userId,
+          sourceType: 'fixture',
+          sourceRef: fixture.id,
+          repository: `fixtures/${fixture.id}`,
+          workflowName: 'fixture tests',
+          state: 'CREATED',
+          allowExecution: parsed.data.allowExecution,
+        });
+
+        jobPayload = { fixtureId: fixture.id };
+      }
 
       events.appendEvent(db, {
         runId: run.id,
         userId: req.userId,
         type: 'run.created',
-        payload: { state: 'CREATED', sourceType: 'fixture', sourceRef: fixture.id },
+        payload: { state: 'CREATED', sourceType: run.source_type, sourceRef: run.source_ref },
       });
 
       // The worker picks this up. The dedupe key makes a double submit a
@@ -102,12 +167,26 @@ export function runRoutes({ db = getDb() } = {}) {
       jobs.enqueue(db, {
         runId: run.id,
         kind: 'investigate',
-        payload: { fixtureId: fixture.id },
+        payload: jobPayload,
         dedupeKey: `investigate:${run.id}`,
       });
 
       res.status(201).json({ run: runs.toPublicRun(run) });
     } catch (error) {
+      // An import failure is the caller's problem to see, not a server error.
+      if (error instanceof GitHubError) {
+        const status = {
+          invalid_run_url: 400,
+          not_found: 404,
+          no_jobs: 409,
+          run_not_failed: 409,
+          no_source_ref: 409,
+          network_error: 502,
+          archive_too_large: 413,
+        }[error.code] ?? 502;
+        next(new ApiError(status, error.code, error.message));
+        return;
+      }
       next(error);
     }
   });

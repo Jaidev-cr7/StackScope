@@ -8,7 +8,7 @@ import { mkdir, writeFile, symlink, stat, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
-import { createWorkspace, removeWorkspace } from '../src/sandbox/workspace.js';
+import { createWorkspace, removeWorkspace, reclaimOrphanWorkspaces, workspaceExists } from '../src/sandbox/workspace.js';
 import {
   resolveInside,
   resolveRealInside,
@@ -416,5 +416,26 @@ describe('extractStreamTo', () => {
     const { readdir } = await import('node:fs/promises');
     const remaining = await readdir(workspace);
     expect(remaining).not.toContain('.extract');
+  });
+});
+describe('reclaiming orphaned workspaces', () => {
+  it('removes a workspace that no live run references', async () => {
+    const root = path.join(SANDBOX_ROOT, 'reclaim');
+    const created = await createWorkspace({ root, label: 'orphan' });
+
+    const removed = await reclaimOrphanWorkspaces([], root);
+
+    expect(removed).toBe(1);
+    expect(await workspaceExists(root, created.id)).toBe(false);
+  });
+
+  it('keeps a workspace a live run still references', async () => {
+    const root = path.join(SANDBOX_ROOT, 'reclaim-live');
+    const created = await createWorkspace({ root, label: 'live' });
+
+    const removed = await reclaimOrphanWorkspaces([created.id], root);
+
+    expect(removed).toBe(0);
+    expect(await workspaceExists(root, created.id)).toBe(true);
   });
 });

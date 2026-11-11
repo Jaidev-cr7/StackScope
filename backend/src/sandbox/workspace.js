@@ -140,7 +140,9 @@ export async function reclaimOrphanWorkspaces(liveWorkspaceIds, root = config.sa
   for (const id of existing) {
     if (live.has(id)) continue;
     try {
-      await removeWorkspace(root, id);
+      // The id is the expected id: the caller is reclaiming a workspace it
+      // found by listing the root, so the guard still applies.
+      await removeWorkspace(root, id, { expectedId: id });
       removed += 1;
     } catch (error) {
       logger.warn({ err: error, workspace: id }, 'could not reclaim orphaned workspace');
