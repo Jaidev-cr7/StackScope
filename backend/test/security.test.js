@@ -419,23 +419,37 @@ describe('extractStreamTo', () => {
   });
 });
 describe('reclaiming orphaned workspaces', () => {
+  // The workspaces these tests create have to be removed afterwards: the
+  // sandbox root survives between runs, so a leftover would be reclaimed by
+  // the next run and the test would count it.
+  const created = [];
+
+  afterEach(async () => {
+    while (created.length) {
+      const { root, workspace } = created.pop();
+      await removeWorkspace(root, workspace.root, { expectedId: workspace.id }).catch(() => {});
+    }
+  });
+
   it('removes a workspace that no live run references', async () => {
     const root = path.join(SANDBOX_ROOT, 'reclaim');
-    const created = await createWorkspace({ root, label: 'orphan' });
+    const workspace = await createWorkspace({ root, label: 'orphan' });
+    created.push({ root, workspace });
 
     const removed = await reclaimOrphanWorkspaces([], root);
 
     expect(removed).toBe(1);
-    expect(await workspaceExists(root, created.id)).toBe(false);
+    expect(await workspaceExists(root, workspace.id)).toBe(false);
   });
 
   it('keeps a workspace a live run still references', async () => {
     const root = path.join(SANDBOX_ROOT, 'reclaim-live');
-    const created = await createWorkspace({ root, label: 'live' });
+    const workspace = await createWorkspace({ root, label: 'live' });
+    created.push({ root, workspace });
 
-    const removed = await reclaimOrphanWorkspaces([created.id], root);
+    const removed = await reclaimOrphanWorkspaces([workspace.id], root);
 
     expect(removed).toBe(0);
-    expect(await workspaceExists(root, created.id)).toBe(true);
+    expect(await workspaceExists(root, workspace.id)).toBe(true);
   });
 });

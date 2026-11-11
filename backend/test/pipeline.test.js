@@ -65,7 +65,10 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await rm(scratch, { recursive: true, force: true });
+  // The whole sandbox root belongs to this file (each test file gets its own),
+  // so removing it clears the scratch directory and the workspaces the worker
+  // created along the way.
+  await rm(config.sandboxRoot, { recursive: true, force: true });
 });
 
 /** A fresh copy of the fixture, with a log that points at it. */
