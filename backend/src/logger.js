@@ -29,7 +29,7 @@ const REDACTED_PATHS = [
 ];
 
 export const logger = pino({
-  level: config.isTest ? 'silent' : config.logLevel,
+  level: config.env === 'test' ? 'silent' : config.logLevel,
   redact: {
     paths: REDACTED_PATHS,
     censor: '[redacted]',
