@@ -42,15 +42,17 @@ async function main() {
   const template = await readFile(example, 'utf8');
   const secret = randomBytes(32).toString('hex');
 
+  // The execution flag is set for local development. The replacement matches
+  // the line whether the template has it commented out or not, so the file
+  // never ends up with the setting twice.
   const contents = `${template
     .replace(/^JWT_SECRET=.*$/m, `JWT_SECRET=${secret}`)
-    .replace(/^# ALLOW_REPO_EXECUTION.*$/m, '')
+    .replace(/^#?\s*ALLOW_REPO_EXECUTION=.*$/m, 'ALLOW_REPO_EXECUTION=true')
     .trimEnd()}
 
-# Set by scripts/setup-env.js for local development.
-# Running a checkout's own code is opt-in: this flag is the first half of
-# that decision and the per-run consent in the UI is the second.
-ALLOW_REPO_EXECUTION=true
+# ALLOW_REPO_EXECUTION was turned on by scripts/setup-env.js for local
+# development. Running a checkout's own code is opt-in: this flag is the first
+# half of that decision and the per-run consent in the UI is the second.
 `;
 
   await writeFile(target, contents, 'utf8');
