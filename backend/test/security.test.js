@@ -296,9 +296,25 @@ describe('validateEntry', () => {
     }
   });
 
-  it('rejects symlinks and hard links outright', () => {
-    expect(() => validateEntry({ path: 'link', type: 'SymbolicLink', linkname: '/etc/passwd' }, root)).toThrow(/link entry/i);
-    expect(() => validateEntry({ path: 'hard', type: 'Link', linkname: '/etc/passwd' }, root)).toThrow(/link entry/i);
+  it('rejects a link that points outside the checkout', () => {
+    // A link is only dangerous when its target leaves the checkout.
+    expect(() => validateEntry({ path: 'link', type: 'SymbolicLink', linkname: '/etc/passwd' }, root)).toThrow(/absolute path/i);
+    expect(() => validateEntry({ path: 'hard', type: 'Link', linkname: '/etc/passwd' }, root)).toThrow(/absolute path/i);
+    expect(() =>
+      validateEntry({ path: 'escape', type: 'SymbolicLink', linkname: '../../outside' }, root),
+    ).toThrow(/outside the checkout/i);
+  });
+
+  it('allows a link that stays inside the checkout', () => {
+    // Real repositories use these: a monorepo sharing a package, a test
+    // fixture pointing at another fixture. Refusing them would make the
+    // integration useless without making it safer.
+    expect(() =>
+      validateEntry({ path: 'alias', type: 'SymbolicLink', linkname: 'real.txt' }, root),
+    ).not.toThrow();
+    expect(() =>
+      validateEntry({ path: 'pkg/alias', type: 'SymbolicLink', linkname: '../other/file.txt' }, root),
+    ).not.toThrow();
   });
 
   it('rejects device and FIFO entries', () => {
@@ -345,12 +361,21 @@ describe('inspectArchive', () => {
     await expect(inspectArchive(stream, workspace)).rejects.toThrow(ArchiveError);
   });
 
-  it('rejects an archive containing a symlink', async () => {
+  it('rejects an archive containing a symlink that escapes', async () => {
     const stream = await buildTarGz([
       { path: 'repo-abc123/ok.txt' },
       { path: 'repo-abc123/passwd', typeflag: '2', linkname: '/etc/passwd' },
     ]);
-    await expect(inspectArchive(stream, workspace)).rejects.toThrow(/link entry/i);
+    await expect(inspectArchive(stream, workspace)).rejects.toThrow(/absolute path/i);
+  });
+
+  it('accepts an archive containing a symlink that stays inside', async () => {
+    const stream = await buildTarGz([
+      { path: 'repo-abc123/real.txt' },
+      { path: 'repo-abc123/alias', typeflag: '2', linkname: 'real.txt' },
+    ]);
+    const { stats } = await inspectArchive(stream, workspace);
+    expect(stats.entries).toBe(2);
   });
 
   it('enforces the entry-count limit', async () => {

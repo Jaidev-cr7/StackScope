@@ -1,0 +1,78 @@
+# The whole application, on one host.
+#
+#   docker compose up --build
+#
+# The frontend is served by nginx on http://localhost:8080 and proxies /api to
+# the backend, so the browser only ever talks to one origin and the session
+# cookie stays first-party.
+#
+# The backend's settings come from an env file. By default that is
+# backend/.env, the developer's local file; for a deployment, point it at the
+# production profile:
+#
+#   BACKEND_ENV_FILE=backend/.env.production docker compose up --build
+#
+# The file's secrets are never written into this file, and `docker compose
+# config` resolves them - so do not paste its output anywhere.
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - ${BACKEND_ENV_FILE:-backend/.env}
+    environment:
+      # These override whatever the env file says, because the compose file
+      # knows things the env file cannot: this is a container, and it is
+      # behind the frontend's port.
+      NODE_ENV: production
+      PORT: 4000
+      FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-http://localhost:8080}
+      DATABASE_PATH: /var/lib/ci-investigator/app.db
+      SANDBOX_ROOT: /var/lib/ci-investigator/sandbox
+      LLM_CACHE_DIR: /var/lib/ci-investigator/llm-cache
+    volumes:
+      # The database, the sandbox and the recording cache. This is the
+      # application's state, so it has to survive a restart.
+      - ci-investigator-state:/var/lib/ci-investigator
+      # The executor runs a checkout's own test command in a container, which
+      # needs the Docker socket.
+      #
+      # This is a real trade-off, and it is worth being explicit about: the
+      # socket gives the container the same privileges as the host, so a
+      # container escape is a host compromise. It is granted here because the
+      # alternative - the local sandbox - contains the paths a checkout can
+      # reach but not the process it can start. On a host where that matters,
+      # run the verification step on a separate machine with its own socket
+      # and leave this one off.
+      - /var/run/docker.sock:/var/run/docker.sock
+    # The socket's group id, so the unprivileged user can use it. Set
+    # DOCKER_GID to the output of: stat -c '%g' /var/run/docker.sock
+    group_add:
+      - "${DOCKER_GID:-999}"
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:4000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  ci-investigator-state:

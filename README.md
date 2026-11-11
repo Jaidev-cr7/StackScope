@@ -462,6 +462,7 @@ ci-investigator/
 │   │   ├── server.js                  Listener, boot recovery, graceful shutdown
 │   │   ├── worker.js                  Job consumer: the investigation pipeline
 │   │   ├── config.js                  Every environment variable, validated once with zod
+│   │   ├── server.js                  Listener, boot checks, graceful shutdown
 │   │   ├── logger.js                  pino instance with credential redaction
 │   │   ├── agent/
 │   │   │   ├── provider.js            live / replay / offline providers, the tool loop
@@ -528,7 +529,11 @@ ci-investigator/
 ├── eval/run-eval.js                   The evaluation harness
 ├── scripts/
 │   ├── check-all.js                   Every check, one PASS/FAIL table
-│   └── setup-env.js                   Creates backend/.env for local development
+│   └── setup-env.js                   Creates the local environment files
+├── deploy/nginx.conf                 Serves the bundle and proxies /api
+├── Dockerfile                         The backend image
+├── frontend/Dockerfile                The frontend image
+├── docker-compose.yml                 The whole application, one host
 ├── package.json
 └── README.md
 ```
@@ -953,69 +958,103 @@ Most of the settings are optional, and the ones that are commented out in `.env.
 | Verify a patch against a real test run | `ALLOW_REPO_EXECUTION=true` **and** tick the box on the run | the installation-wide flag is only half of it; the per-run consent is the other half |
 | Import a failed GitHub Actions run | `GITHUB_MODE=live` and `GITHUB_TOKEN=…` | the token is needed for the job log, not just for private repositories |
 | Import a private repository | `GITHUB_MODE=live` and a token with the `repo` scope | |
-| Deploy it | `NODE_ENV=production` and a real `JWT_SECRET` | the server refuses to start in production without one |
+| Deploy it | `NODE_ENV=production` and a real `JWT_SECRET` | the server refuses to start without them |
 | Put it behind a different frontend origin | `FRONTEND_ORIGIN=https://your-host` | |
-| Change the port | `PORT=…` | |
+| Change the port | `PORT=…` **and** `VITE_API_TARGET` in `frontend/.env` | changing one without the other breaks the dev proxy |
 | See more detail in the logs | `LOG_LEVEL=debug` | |
+
+`npm run setup` turns on `ALLOW_REPO_EXECUTION` for the local machine, because a local demo needs to run a fixture's own test command twice to verify a patch. It prints that it has done so. The other defaults are deliberately inert: replay mode for the model, and GitHub imports disabled, so nothing leaves the machine until you say so.
 
 Two of these deserve a note.
 
-**`GITHUB_MODE` defaults to `replay`, and in that mode an import is refused** — with an explanation, not a silent network call. The default means "nothing leaves this machine", and the code honours that. Set it to `live` to enable imports.
+**`GITHUB_MODE` defaults to `replay`, and in that mode an import is refused** — with an explanation, not a silent network call. The default means "nothing leaves this machine", and the code honours that.
 
-**A `GITHUB_TOKEN` is needed for a GitHub import, and the reason is not obvious.** The metadata, the job list and the source archive are all readable anonymously; the *job log* is not. Since the log is what the analysis is built on, an import without a token cannot be analysed, and the API says so in as many words rather than leaving a bare 403 to decode.
-
-**`GITHUB_WEBHOOK_SECRET` is not used by any route.** There is no webhook endpoint in the application: the schema has a `webhook_deliveries` table for delivery-id deduplication, but nothing writes to it. The setting is there for the table it belongs to, and it can stay commented out.
+**`GITHUB_WEBHOOK_SECRET` does not exist.** There is no webhook endpoint in the application: the schema has a `webhook_deliveries` table for delivery-id deduplication, but nothing writes to it. The setting was removed rather than left in place as a placeholder for something that is not there.
 
 ### About webhooks
 
 Nothing in the application receives a webhook. An investigation is started by a person, from the dashboard, and the GitHub integration is a *pull*: the app reads a run, its job log and its source archive when you ask it to. That is the whole of the GitHub surface — four read-only endpoints, and no way for the application to write to a repository.
 
+### Deploying it
+
+The repository ships the deployment configuration, so "one origin" is a real thing rather than a description:
+
+```bash
+cp backend/.env.production.example backend/.env   # then fill in the two secrets
+docker compose up --build
+```
+
+The frontend is served by nginx on port 8080 and proxies `/api` to the backend, so the browser only ever talks to one origin and the session cookie stays first-party. The backend's state — the database, the sandbox and the recording cache — lives on a named volume.
+
+The `Dockerfile` builds the frontend and the backend in one pass and runs the server as an unprivileged user. `docker-compose.yml` wires the two together and grants the backend the Docker socket, which the verification step needs to run a checkout's test command in a container.
+
+Two things to know about that socket: it gives the container the same privileges as the host, so a container escape is a host compromise; and the session cookie is marked `Secure` in production, so it is only sent over HTTPS. Put a TLS terminator in front of it for anything real.
+
 ---
 
 ## 10. Configuration reference
 
-Every variable is read and validated in one place (`backend/src/config.js`), so a missing or malformed value is a startup error rather than a runtime surprise. The environment file is loaded from an absolute path, so it is found no matter which directory the process was started from.
+Every application setting is read and validated in one place (`backend/src/config.js`), so a missing or malformed value is a startup error rather than a runtime surprise. The environment file is loaded from an absolute path, so it is found no matter which directory the process was started from, and it is not loaded at all under `NODE_ENV=test`, so a developer's local file cannot change what the test suite does.
 
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
-| `JWT_SECRET` | In production | dev fallback | Signs the session cookie. In production the server refuses to start if it is empty or one of the well-known placeholders. |
-| `JWT_TTL_SECONDS` | No | `43200` (12 h) | Session lifetime. |
+| `JWT_SECRET` | In production | dev fallback | Signs the session cookie. In production the server refuses to start if it is empty, a known placeholder, the development fallback, or shorter than 32 characters. |
+| `JWT_TTL_SECONDS` | No | `43200` (12 h) | Session lifetime. Between 60 seconds and 30 days. |
 | `PORT` | No | `4000` | The port the API listens on. |
-| `NODE_ENV` | No | `development` | `development` \| `test` \| `production`. `production` enables the secret check and secure cookies. |
-| `FRONTEND_ORIGIN` | No | `http://localhost:5173` | Comma-separated list of origins allowed to send credentialed requests. `CORS_ORIGIN` is accepted as an alias. |
+| `NODE_ENV` | No | `development` | `development` \| `test` \| `production`. `production` enables the secret checks, marks the session cookie `Secure`, and requires a container runtime before repository code may be executed. |
+| `FRONTEND_ORIGIN` | In production | `http://localhost:5173` | Comma-separated list of origins allowed to send credentialed requests. In production the server refuses to start while it still points at the development server. |
 | `LLM_MODE` | No | `replay` | `live` calls the provider; `replay` serves recorded responses and makes no network call. |
-| `GEMINI_API_KEY` | No | — | The key for the live provider. |
-| `GEMINI_MODEL` / `LLM_MODEL` | No | `gemini-3.5-flash-lite` | The primary model. `GEMINI_MODEL` wins. |
-| `LLM_FALLBACK_MODEL` | No | — | Tried once when the primary model is unavailable. |
-| `LLM_REASONING_LEVEL` | No | `low` | The reasoning effort to request. |
-| `LLM_CACHE_DIR` | No | `<repo>/.cache/llm` | Where recorded model responses are kept. |
-| `LLM_CACHE_READONLY` | No | `false` | Treats the cache as read-only. |
+| `GEMINI_API_KEY` | With `LLM_MODE=live` | — | The key for the live provider. Required in production when the mode is `live`. |
+| `LLM_MODEL` | No | `gemini-3.8-flash` | The primary model. |
+| `LLM_FALLBACK_MODEL` | No | — | Tried once when the primary model is unavailable (a busy provider, an exhausted quota). |
+| `LLM_REASONING_LEVEL` | No | `low` | How hard the model should think: `minimal` \| `low` \| `medium` \| `high`. |
+| `LLM_CACHE_DIR` | No | `<repo>/.cache/llm` | Where recorded model responses are kept. A live run records what the model said, so the same input can be answered later without a network call. |
 | `GITHUB_MODE` | No | `replay` | `live` enables GitHub imports; `replay` refuses them, so nothing leaves the machine. |
-| `GITHUB_TOKEN` | Required for imports | — | A personal access token with `actions:read` (public repositories) or `repo` (private ones). GitHub refuses the job log without one, so an import cannot be analysed without it. |
-| `GITHUB_WEBHOOK_SECRET` | No | — | Secret for verifying inbound webhook signatures. No webhook route exists yet, so nothing reads it. |
-| `GITHUB_API_URL` | No | `https://api.github.com` | The API base. |
-| `ALLOW_REPO_EXECUTION` | No | `false` | The installation-wide half of the execution consent. |
+| `GITHUB_TOKEN` | With `GITHUB_MODE=live` | — | A personal access token with `actions:read` (public repositories) or `repo` (private ones). GitHub refuses the job log without one, so an import cannot be analysed without it. Required in production when the mode is `live`. |
+| `GITHUB_API_URL` | No | `https://api.github.com` | The API base. Point it at a GitHub Enterprise instance to use one. |
+| `ALLOW_REPO_EXECUTION` | No | `false` | The installation-wide half of the execution consent. In production the executor must be a container, and the server refuses to start with this on and no container runtime available. |
 | `EXECUTION_TIMEOUT_MS` | No | `300000` | Budget for a test command. |
 | `EXECUTION_SETUP_TIMEOUT_MS` | No | `600000` | Budget for a dependency install. |
 | `DATABASE_PATH` | No | `<backend>/data/app.db` | The SQLite database. |
-| `SANDBOX_ROOT` | No | `<backend>/.tmp` | Where disposable checkouts are created. |
-| `TRACK_MAX_POLL_MS` | No | `900000` | The polling window for a tracked workflow. |
-| `LOG_LEVEL` | No | `info` | The pino log level. |
+| `SANDBOX_ROOT` | No | `<backend>/.tmp` | Where disposable checkouts are created. This is the execution boundary — a command will not be run outside it. |
+| `LOG_LEVEL` | No | `info` | The log level: `trace` \| `debug` \| `info` \| `warn` \| `error` \| `fatal` \| `silent`. |
 
-`backend/.env.example` is the annotated template. `backend/.env` itself is git-ignored and must never be committed.
+The frontend has one setting of its own: `VITE_API_TARGET` in `frontend/.env`, the address the dev server proxies `/api` to. It has to match the backend's `PORT`, or the frontend talks to a port nothing is listening on.
 
----
+### The three files
+
+| File | What it is |
+|---|---|
+| `backend/.env.example` | The local development reference. Every setting, with its default. |
+| `backend/.env.production.example` | The production profile. Every required setting filled in, with unmistakable placeholders for the secrets. |
+| `backend/.env` | Your local file. Git-ignored, never committed. `npm run setup` creates it. |
+
+### What the server refuses to start with
+
+In production, every one of these is a startup error with an explanation, not a warning:
+
+- a missing, placeholder or short `JWT_SECRET`;
+- a `FRONTEND_ORIGIN` that still points at the development server;
+- `LLM_MODE=live` with no `GEMINI_API_KEY`;
+- `GITHUB_MODE=live` with no `GITHUB_TOKEN`;
+- `ALLOW_REPO_EXECUTION=true` with no container runtime available.
+
+Outside production the same values fall back to safe defaults, so the project runs with an empty `.env`.
+
+### Mistyped variables
+
+A variable that looks like one of this application's settings but is not recognised is a startup error too. Zod strips unknown keys, which is what makes it usable against `process.env` at all — but it means a typo used to be accepted and ignored. `JWT_SECRETS`, `LLM_MODELS` and `ALLOW_REPO_EXECTUTION` are now caught. The variables GitHub Actions and other CI systems set are excluded from that check, so the application still starts in a pipeline.
 
 ## 11. Testing and evaluation
 
-**275 tests**, all of which run offline.
+**309 tests**, all of which run offline.
 
 ### Running them
 
 ```bash
 npm test                  # everything
-npm run test:backend      # 200 tests
-npm run test:frontend     # 75 tests
+npm run test:backend      # 232 tests
+npm run test:frontend     # 77 tests
 npm run check:all         # the tests, the fixtures, the build and the evaluation
 ```
 
@@ -1023,12 +1062,13 @@ npm run check:all         # the tests, the fixtures, the build and the evaluatio
 
 | Suite | Tests | What it protects |
 |---|---|---|
-| `test/security.test.js` | 50 | Path traversal, symlink escapes, decompression bombs, unsafe archives. Each test builds a genuinely malicious input — a real tarball with a `../` entry, a real symlink — rather than asserting about internals. |
-| `test/analysis.test.js` | 59 | Log normalisation and failure classification against the real captured fixture logs, plus formats the fixtures do not cover (pytest, Maven, Gradle). |
+| `test/security.test.js` | 52 | Path traversal, symlink escapes, decompression bombs, unsafe archives. Each test builds a genuinely malicious input — a real tarball with a `../` entry, a real symlink — rather than asserting about internals. |
+| `test/analysis.test.js` | 60 | Log normalisation and failure classification against the real captured fixture logs, plus formats the fixtures do not cover (pytest, Maven, Gradle) and the Vitest frame format. |
+| `test/config.test.js` | 25 | The configuration: every default, every validation failure, and every production refusal — each one loaded in a child process with a controlled environment. |
 | `test/db.test.js` | 27 | Migrations, ownership scoping, the state machine, job leasing and recovery, event ordering, audit writes. |
 | `test/api.test.js` | 24 | The HTTP surface: registration, login, rate limiting, cross-user access, the SSE stream and its resume. |
 | `test/agent.test.js` | 18 | The provider: answer parsing, the replay fallback, the tool executor's containment, the loop's step budget. |
-| `test/verification.test.js` | 18 | Diff application, the runner registry, and the verification decision table — including two runs of a real test command. |
+| `test/verification.test.js` | 22 | Diff application, the runner registry, the verification decision table, and the GitHub import — including two runs of a real test command. |
 | `test/pipeline.test.js` | 4 | The whole pipeline, end to end, ending in a `VERIFIED` patch. |
 
 Two examples of what the assertions actually say:

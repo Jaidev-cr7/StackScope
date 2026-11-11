@@ -24,6 +24,10 @@ import { stripAnsi, normalizeTimestamps } from './logNormalize.js';
 // permissive regex silently turns those frames into a file named
 // "#translate (node:internal/..." which then looks like repository code.
 const AT_PREFIX = /^\s*at\s+/;
+// A Vitest frame: the `❯` marker, an optional function name, and a location.
+// The function name is matched loosely because Vitest prints whatever the
+// runtime gave it - `Timeout._onTimeout`, `Object.<anonymous>`, `fn`.
+const VITEST_FRAME = /^\s*❯\s*(?:(?<fn>[^\s()]+)\s+)?(?<loc>[^\s]+)\s*$/;
 const PYTHON_FRAME = /^\s*File\s+"(?<loc>[^"]+)",\s+line\s+(?<line>\d+)/;
 
 // A trailing `path:line[:column]`. The path may itself contain colons
@@ -111,6 +115,26 @@ export function parseFrameLine(line) {
       file: python.groups.loc,
       line: Number.parseInt(python.groups.line, 10) || null,
       column: null,
+    };
+  }
+
+  // Vitest prints its own frame format, which is not Node's:
+  //
+  //     ❯ Timeout._onTimeout playground/hmr-ssr/__tests__/hmr-ssr.spec.ts:1098:25
+  //     ❯ src/foo.ts:12:5
+  //
+  // Vitest is one of the runners this registry supports, so a log from a
+  // Vitest project has to be readable too. Without this the frames are
+  // invisible and the failure has no location at all.
+  const vitest = line.match(VITEST_FRAME);
+  if (vitest) {
+    const parsed = vitest.groups.loc.match(LOCATION_RE);
+    if (!parsed) return null;
+    return {
+      functionName: vitest.groups.fn ?? null,
+      file: parsed.groups.path,
+      line: Number.parseInt(parsed.groups.line, 10) || null,
+      column: Number.parseInt(parsed.groups.column ?? '0', 10) || null,
     };
   }
 

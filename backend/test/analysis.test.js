@@ -222,6 +222,26 @@ describe('analyzeFailure on the real fixture logs', () => {
     },
   );
 
+  it('reads a Vitest frame', () => {
+    // Vitest prints its own frame format, and Vitest is one of the runners
+    // this project supports, so its logs have to be readable too.
+    const result = analyzeFailure(
+      [
+        ' FAIL  serve playground/hmr-ssr/__tests__/hmr-ssr.spec.ts',
+        'Error: Timeout waiting for console logs.',
+        ' ❯ Timeout._onTimeout playground/hmr-ssr/__tests__/hmr-ssr.spec.ts:1098:25',
+        ' ❯ src/serve.ts:12:5',
+      ].join('\n'),
+      { roots: [] },
+    );
+
+    expect(result.repoFrames.length).toBeGreaterThan(0);
+    expect(result.repoFrames[0].file).toBe('playground/hmr-ssr/__tests__/hmr-ssr.spec.ts');
+    expect(result.repoFrames[0].line).toBe(1098);
+    expect(result.repoFrames[0].functionName).toBe('Timeout._onTimeout');
+    expect(result.suspectedFile).toBe('playground/hmr-ssr/__tests__/hmr-ssr.spec.ts');
+  });
+
   it('finds the first repository frame, not a Node internal', () => {
     const result = analyzeFailure(logs['01-logic-bug'], { roots: rootsFor('01-logic-bug') });
     expect(result.firstFrame.file).toBe('test/cart.test.js');

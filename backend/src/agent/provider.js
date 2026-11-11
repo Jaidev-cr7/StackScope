@@ -243,6 +243,41 @@ export function createReplayProvider({ cacheDir = config.llm.cacheDir, fallback 
   };
 }
 
+/**
+ * Write a live answer to the cache, so the next run of the same input is
+ * answered without a network call.
+ *
+ * This is what makes the cache directory worth configuring: a live run
+ * records what the model said, and a later run - on a machine with no key, or
+ * with the provider's quota exhausted - replays it. The recording is keyed by
+ * the source and the hash of the log it was made from, so it is only ever
+ * replayed for the input it was produced from.
+ *
+ * A failure to write is never fatal: the answer was produced, and losing the
+ * recording only costs the next run a call.
+ */
+export async function recordResponse({ cacheDir = config.llm.cacheDir, sourceRef, logText, model, response }) {
+  if (!sourceRef || !response) return null;
+  try {
+    await mkdir(cacheDir, { recursive: true, mode: 0o700 });
+    const record = {
+      _note:
+        'A recorded model response, captured from the live provider. The replay provider serves it so the same input can be answered without a network call.',
+      sourceRef,
+      model: model ?? null,
+      logHash: hashText(logText),
+      response,
+    };
+    const name = `${sourceRef.replace(/[^A-Za-z0-9._-]/g, '_')}-${hashText(logText)}.json`;
+    await writeFile(path.join(cacheDir, name), JSON.stringify(record, null, 2), 'utf8');
+    logger.info({ sourceRef }, 'recorded the model response');
+    return name;
+  } catch (error) {
+    logger.warn({ err: error, sourceRef }, 'could not record the model response');
+    return null;
+  }
+}
+
 export function hashText(text) {
   return createHash('sha256').update(String(text ?? '')).digest('hex').slice(0, 32);
 }
@@ -285,10 +320,11 @@ async function withRetry(fn, { attempts = 3, delayMs = 2000 } = {}) {
  * step budget is spent, or when the tool-call budget is spent - never earlier,
  * and never later.
  */
-export function createLiveProvider({ apiKey, model, fallbackModel, client } = {}) {
+export function createLiveProvider({ apiKey, model, fallbackModel, reasoningLevel, client } = {}) {
   const key = apiKey ?? config.llm.apiKey;
   const modelName = model ?? config.llm.model;
   const fallback = fallbackModel ?? config.llm.fallbackModel;
+  const level = reasoningLevel ?? config.llm.reasoningLevel;
 
   return {
     id: `gemini:${modelName}`,
@@ -352,6 +388,14 @@ export function createLiveProvider({ apiKey, model, fallbackModel, client } = {}
             config: {
               systemInstruction,
               tools: [{ functionDeclarations: TOOL_DECLARATIONS }],
+              // The reasoning budget is a configuration setting, not a
+              // constant: a cheap model asked to reason hard is slower than
+              // it needs to be, and an expensive one asked to reason briefly
+              // is wrong for the job.
+              thinkingConfig: {
+                thinkingLevel: (level ?? 'low').toUpperCase(),
+                includeThoughts: false,
+              },
             },
           });
 
@@ -377,7 +421,16 @@ export function createLiveProvider({ apiKey, model, fallbackModel, client } = {}
           : (response?.functionCalls ?? []);
 
         if (calls.length === 0) {
-          return parseModelAnswer(response?.text, request);
+          const answer = parseModelAnswer(response?.text, request);
+          // The answer is recorded so the next run of the same input can be
+          // answered without a network call.
+          await recordResponse({
+            sourceRef: request.sourceRef,
+            logText: request.logText,
+            model: modelName,
+            response: answer,
+          });
+          return answer;
         }
 
         // The turn structure has to alternate: a model turn that asks for
@@ -492,9 +545,15 @@ export function parseModelAnswer(text, request = {}) {
  * offline reasoner. `live` requires a key; without one it says so and falls
  * back rather than failing the run.
  */
-export function createProvider({ mode = config.llm.mode, apiKey = config.llm.apiKey, model } = {}) {
+export function createProvider({
+  mode = config.llm.mode,
+  apiKey = config.llm.apiKey,
+  model,
+  fallbackModel,
+  reasoningLevel,
+} = {}) {
   if (mode === 'live' && apiKey) {
-    return createLiveProvider({ apiKey, model });
+    return createLiveProvider({ apiKey, model, fallbackModel, reasoningLevel });
   }
   if (mode === 'live') {
     logger.warn('LLM_MODE=live but no API key is configured; falling back to the offline reasoner');

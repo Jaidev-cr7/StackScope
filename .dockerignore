@@ -1,0 +1,32 @@
+# The build context.
+#
+# The local environment file must never reach an image layer: a build context
+# is uploaded to the daemon and can end up in the layer cache. The image gets
+# its settings from the environment at run time, never from a file baked into
+# it.
+.env
+.env.*
+!.env.example
+!.env.production.example
+
+# Dependencies are installed inside the image.
+node_modules
+**/node_modules
+
+# Build output and scratch space.
+dist
+**/dist
+backend/.tmp
+backend/data
+.cache
+
+# Working artefacts.
+docs
+*.zip
+*.log
+eval/results.json
+fixtures/repos
+fixtures/logs
+.git
+.gitignore
+.claude

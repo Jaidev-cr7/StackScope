@@ -96,14 +96,18 @@ export function validateEntry(entry, targetDir, limits = EXTRACTION_LIMITS) {
     throw new ArchiveError(`Archive entry is nested too deeply (${depth})`, { code: 'TOO_DEEP', entry: rawPath });
   }
 
-  // Links are refused, not sanitised.
+  // Links are checked, not blanket-refused.
+  //
+  // A link is only dangerous when its target leaves the checkout - a link
+  // pointing at `/etc/passwd` would let a later read escape the sandbox, and
+  // a link pointing at `../../outside` would let a write escape it. A link
+  // whose target resolves inside the checkout is harmless and is extremely
+  // common: monorepos use them for shared packages, and test fixtures use
+  // them on purpose. Refusing every link would make the integration useless
+  // against real repositories without making it any safer.
   if (entry.type === 'SymbolicLink' || entry.type === 'Link') {
-    throw new ArchiveError(`Archive contains a link entry, which is not allowed: ${rawPath}`, {
-      code: 'LINK_ENTRY',
-      entry: rawPath,
-    });
-  }
-  if (!['File', 'Directory', 'OldFile', 'ContiguousFile'].includes(entry.type)) {
+    assertLinkStaysInside(entry, unified, resolved, targetDir);
+  } else if (!['File', 'Directory', 'OldFile', 'ContiguousFile'].includes(entry.type)) {
     throw new ArchiveError(`Archive entry has an unsupported type (${entry.type}): ${rawPath}`, {
       code: 'UNSUPPORTED_ENTRY_TYPE',
       entry: rawPath,
@@ -118,6 +122,47 @@ export function validateEntry(entry, targetDir, limits = EXTRACTION_LIMITS) {
   }
 
   return { resolved, relative: unified };
+}
+
+/**
+ * A link is allowed only when its target stays inside the checkout.
+ *
+ * The target is resolved relative to the directory that holds the link, the
+ * same way the filesystem resolves it. An absolute target is allowed only if
+ * it is inside the checkout as well - which, for an archive, it never is,
+ * because the checkout's own path is not known to the archive's author.
+ */
+function assertLinkStaysInside(entry, unified, resolved, targetDir) {
+  // node-tar exposes the target as `linkpath`; the tar header itself calls it
+  // `linkname`. Both spellings are accepted so a hand-built entry and a
+  // parsed one are validated the same way.
+  const rawTarget = entry.linkpath ?? entry.linkname ?? '';
+  if (!rawTarget) {
+    throw new ArchiveError(`Archive contains a link with no target: ${unified}`, {
+      code: 'LINK_ENTRY',
+      entry: unified,
+    });
+  }
+
+  if (path.isAbsolute(rawTarget)) {
+    throw new ArchiveError(
+      `Archive contains a link to an absolute path, which is not allowed: ${unified} -> ${rawTarget}`,
+      { code: 'LINK_ESCAPE', entry: unified },
+    );
+  }
+
+  // The link lives in the directory that holds it, so that is what its
+  // target is resolved against.
+  const linkDirectory = path.dirname(resolved);
+  const target = path.resolve(linkDirectory, rawTarget);
+  const rootWithSep = targetDir.endsWith(path.sep) ? targetDir : `${targetDir}${path.sep}`;
+
+  if (target !== targetDir && !target.startsWith(rootWithSep)) {
+    throw new ArchiveError(
+      `Archive contains a link that points outside the checkout: ${unified} -> ${rawTarget}`,
+      { code: 'LINK_ESCAPE', entry: unified },
+    );
+  }
 }
 
 /**
