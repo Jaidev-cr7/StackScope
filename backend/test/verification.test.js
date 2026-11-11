@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { applyUnifiedDiff, repairHunkHeaders } from '../src/patch/apply.js';
-import { verifyDiff } from '../src/patch/verify.js';
+import { verifyDiff, isTestPath } from '../src/patch/verify.js';
 import { resolvePlan } from '../src/runner/registry.js';
 import { createGitHubClient, parseRunUrl } from '../src/github/client.js';
 
@@ -361,6 +361,52 @@ describe('verifyDiff', () => {
 
     expect(result.status).toBe('APPLIES_CLEANLY');
     expect(result.reasonCode).toBe('BASELINE_ALREADY_PASSING');
+  });
+
+  it('refuses to verify a patch that changes the test', async () => {
+    // A patch that rewrites the test to make it pass proves nothing, so the
+    // verification refuses it rather than reporting a VERIFIED that means
+    // nothing.
+    const { root, checkout } = await makeCheckout('verify-test-edit');
+
+    const testEdit = [
+      '--- a/test/cart.test.js',
+      '+++ b/test/cart.test.js',
+      '@@ -9,3 +9,3 @@',
+      '   ];',
+      '-  assert.equal(cartTotal(items), 1200);',
+      '+  assert.equal(cartTotal(items), 350);',
+      ' });',
+      '',
+    ].join('\n');
+
+    const result = await verifyDiff({
+      checkoutRoot: checkout,
+      diffText: testEdit,
+      executionAllowed: true,
+      globalExecutionAllowed: true,
+      sandboxRoot: root,
+    });
+
+    expect(result.status).toBe('UNVERIFIED');
+    expect(result.reasonCode).toBe('PATCH_MODIFIES_TESTS');
+    expect(result.reason).toMatch(/test file/i);
+    // The baseline still ran, so the failure was real.
+    expect(result.baseline.exitCode).not.toBe(0);
+    expect(result.patched).toBeNull();
+  });
+
+  it('recognises a test file by its directory or its name', () => {
+    expect(isTestPath('test/cart.test.js')).toBe(true);
+    expect(isTestPath('tests/unit/cart.js')).toBe(true);
+    expect(isTestPath('__tests__/cart.js')).toBe(true);
+    expect(isTestPath('src/cart.spec.ts')).toBe(true);
+    expect(isTestPath('packages/core/src/cart.test.js')).toBe(true);
+
+    expect(isTestPath('src/cart.js')).toBe(false);
+    expect(isTestPath('src/testing/helpers.js')).toBe(false);
+    expect(isTestPath('latest/cart.js')).toBe(false);
+    expect(isTestPath('')).toBe(false);
   });
 });
 

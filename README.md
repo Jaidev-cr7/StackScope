@@ -193,9 +193,12 @@ A proposed diff is applied to a fresh copy of the checkout and then judged by ru
 | The baseline run already passed | `APPLIES_CLEANLY` | `BASELINE_ALREADY_PASSING` |
 | The patched run timed out | `APPLIES_CLEANLY` | `PATCHED_TIMEOUT` |
 | The patched run still failed | `APPLIES_CLEANLY` | `PATCHED_FAILED` |
+| The patch changes a test file | `UNVERIFIED` | `PATCH_MODIFIES_TESTS` |
 | The baseline failed and the patched run passed | `VERIFIED` | — |
 
 The baseline and the patched run use the *identical* argv. Both exit codes are persisted with the patch, so the claim can be re-read later rather than taken on trust.
+
+A patch that changes a **test file** is refused. The test is what the result is measured against, so a patch that rewrites the test to make it pass would turn "the fix works" into "the test was rewritten" — a `VERIFIED` that means nothing. The status is `UNVERIFIED` with the reason `PATCH_MODIFIES_TESTS`.
 
 **How the user interacts with it:** the run detail page shows the verification badge, the reason the backend gave, the diff, and the timeline. The "run this project's test command" checkbox on the dashboard is the per-run half of the execution consent.
 

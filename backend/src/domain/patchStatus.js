@@ -20,6 +20,8 @@ export const REASON_CODES = Object.freeze({
   BASELINE_NOT_REPRODUCIBLE:
     'The failing test command could not be reproduced in the isolated checkout, so there is no failing baseline to fix.',
   PATCH_DID_NOT_APPLY: 'The proposed diff did not apply cleanly to the checkout.',
+  PATCH_MODIFIES_TESTS:
+    'The proposed diff changes a test file, so a passing test would not prove that the fix works.',
   PATCH_APPLIED_BASELINE_PASSES:
     'The patch applied cleanly and the baseline command passed on the unmodified checkout, so there was no failure to verify against.',
   RUNNER_UNAVAILABLE:

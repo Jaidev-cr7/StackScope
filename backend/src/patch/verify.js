@@ -27,6 +27,7 @@ import { config } from '../config.js';
 import { logger } from '../logger.js';
 import { resolvePlan } from '../runner/registry.js';
 import { runIsolatedOrLocal } from '../runner/isolate.js';
+import { runCommand } from '../runner/execute.js';
 import { applyUnifiedDiff } from './apply.js';
 import { reason as reasonFor } from '../domain/patchStatus.js';
 import { createCheckoutReader } from '../sandbox/checkout.js';
@@ -71,6 +72,33 @@ function summarise(result, argv) {
 /** What a verified patch says about itself. */
 export const VERIFIED_REASON =
   'The failing command failed on the unmodified checkout and passed on the patched checkout.';
+
+/**
+ * Files that hold tests.
+ *
+ * A patch that changes one of these proves nothing: the test is what the
+ * result is measured against, so a patch that edits the test to make it pass
+ * would turn "the fix works" into "the test was rewritten". The verification
+ * refuses those patches rather than reporting a VERIFIED that means nothing.
+ *
+ * The list covers the conventions the runner adapters recognise - a `test/`,
+ * `tests/`, `__tests__` or `spec` directory, or a file named `*.test.*` or
+ * `*.spec.*`.
+ */
+const TEST_DIRECTORY_NAMES = new Set(['test', 'tests', '__tests__', 'spec', 'specs', 'e2e']);
+const TEST_FILE_RE = /\.(test|spec)\.[cm]?[jt]sx?$/i;
+
+export function isTestPath(relativePath) {
+  const normalized = String(relativePath ?? '').replace(/\\/g, '/');
+  const segments = normalized.split('/').filter(Boolean);
+  if (segments.length === 0) return false;
+
+  // A file inside a test directory is a test.
+  if (segments.slice(0, -1).some((segment) => TEST_DIRECTORY_NAMES.has(segment))) return true;
+
+  // A file named like a test is a test, wherever it lives.
+  return TEST_FILE_RE.test(segments[segments.length - 1]);
+}
 
 /**
  * Verify a proposed diff against a checkout.
@@ -152,7 +180,16 @@ export async function verifyDiff({
   if (plan.requiresInstall && (await needsInstall(checkoutRoot))) {
     const install = plan.install;
     if (install?.command?.length) {
-      const installed = await runIsolatedOrLocal({
+      // The install runs on the host, not in the container.
+      //
+      // The container has no network and a read-only mount, so `npm ci` can
+      // neither reach a registry nor write node_modules - it would fail for
+      // every project that has dependencies. On the host it is safe, because
+      // the install policy forbids lifecycle scripts: `npm ci --ignore-scripts`
+      // fetches and unpacks packages but never runs a line of their code. The
+      // *test* command is what runs untrusted code, and that still runs in the
+      // container with no network.
+      const installed = await runCommand({
         argv: [...install.command, ...(install.args ?? [])],
         cwd: checkoutRoot,
         root: sandboxRoot,
@@ -183,6 +220,17 @@ export async function verifyDiff({
   if (!applied.applied) {
     return finish('UNVERIFIED', 'PATCH_DID_NOT_APPLY', applied.reason, {
       baseline: summarise(baseline, argv),
+    });
+  }
+
+  // A patch that changes a test proves nothing, so it is refused before the
+  // patched run happens. The baseline is kept, because it is still evidence
+  // that the failure was real.
+  const touchedTests = applied.changed.filter((file) => isTestPath(file));
+  if (touchedTests.length > 0) {
+    return finish('UNVERIFIED', 'PATCH_MODIFIES_TESTS', touchedTests.join(', '), {
+      baseline: summarise(baseline, argv),
+      files: applied.changed,
     });
   }
 
