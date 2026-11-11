@@ -1020,6 +1020,7 @@ Every application setting is read and validated in one place (`backend/src/confi
 | `EXECUTION_SETUP_TIMEOUT_MS` | No | `600000` | Budget for a dependency install. |
 | `DATABASE_PATH` | No | `<backend>/data/app.db` | The SQLite database. |
 | `SANDBOX_ROOT` | No | `<backend>/.tmp` | Where disposable checkouts are created. This is the execution boundary — a command will not be run outside it. |
+| `TRUST_PROXY` | No | `0` | How many reverse-proxy hops sit in front of the backend. `0` ignores `X-Forwarded-For` entirely, so the client address is the socket address; the bundled docker-compose deployment sets it to `1` because nginx is the only way in. `true` is refused: it would let a client choose the address the rate limits are keyed on. |
 | `LOG_LEVEL` | No | `info` | The log level: `trace` \| `debug` \| `info` \| `warn` \| `error` \| `fatal` \| `silent`. |
 
 The frontend has one setting of its own: `VITE_API_TARGET` in `frontend/.env`, the address the dev server proxies `/api` to. It has to match the backend's `PORT`, or the frontend talks to a port nothing is listening on.

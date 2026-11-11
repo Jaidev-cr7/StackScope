@@ -106,12 +106,18 @@ describe('parseModelAnswer', () => {
 describe('the tool executor', () => {
   it('reads a file inside the checkout', async () => {
     const root = await makeCheckout();
+    // The reader's contract is a repository-relative path: it resolves the
+    // path itself, follows symlinks and re-checks containment. The executor
+    // passes the relative path through, so the fake does what the real
+    // reader does with it.
+    const seen = [];
     const executor = createToolExecutor({
       checkoutRoot: root,
-      readFile: async (absolute) => {
+      readFile: async (relative) => {
+        seen.push(relative);
         const { readFile } = await import('node:fs/promises');
         try {
-          return await readFile(absolute, 'utf8');
+          return await readFile(path.join(root, relative), 'utf8');
         } catch {
           return null;
         }
@@ -122,6 +128,10 @@ describe('the tool executor', () => {
 
     const result = await executor.execute('read_file', { path: 'src/cart.js' });
     expect(result.text).toContain('export const x = 1;');
+    // The path handed to the reader is relative, not absolute: an absolute
+    // path is exactly what the reader refuses to resolve, so passing one
+    // would make every read fail.
+    expect(seen).toEqual(['src/cart.js']);
   });
 
   it('refuses to read outside the checkout', async () => {

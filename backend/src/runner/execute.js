@@ -28,6 +28,27 @@ export class ExecutionError extends Error {
 export const MAX_CAPTURED_BYTES = 2 * 1024 * 1024;
 
 /**
+ * Kill a child and everything it started.
+ *
+ * The child was spawned as its own process-group leader, so the negative pid
+ * addresses the whole group. If the group is already gone the fallback kills
+ * the child directly; if that fails too, the process has already exited and
+ * there is nothing left to do.
+ */
+export function killTree(child, signal = 'SIGKILL') {
+  if (!child?.pid) return;
+  try {
+    process.kill(-child.pid, signal);
+  } catch {
+    try {
+      child.kill(signal);
+    } catch {
+      // Already gone.
+    }
+  }
+}
+
+/**
  * @param {object} options
  * @param {string[]} options.argv       argument vector, argv[0] is the program
  * @param {string}   options.cwd        working directory (must be inside `root`)
@@ -67,6 +88,12 @@ export function runCommand({ argv, cwd, root, timeoutMs = 300_000, env = {} }) {
         cwd: resolvedCwd,
         shell: false,
         stdio: ['ignore', 'pipe', 'pipe'],
+        // The child leads its own process group. A test runner forks workers,
+        // and those workers fork more; killing only the direct child leaves
+        // them running, still holding the checkout open and still burning CPU
+        // long after the run has been reported as timed out. With a process
+        // group the whole tree can be killed at once.
+        detached: true,
         env: {
           PATH: process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin',
           HOME: resolvedCwd,
@@ -102,7 +129,7 @@ export function runCommand({ argv, cwd, root, timeoutMs = 300_000, env = {} }) {
 
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill('SIGKILL');
+      killTree(child, 'SIGKILL');
     }, timeoutMs);
 
     child.on('error', (error) => {

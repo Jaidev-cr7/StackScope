@@ -55,6 +55,17 @@ export function planArgv(plan) {
   return [...(plan.command ?? []), ...(plan.args ?? [])];
 }
 
+/**
+ * Do two argv arrays ask for the same thing?
+ *
+ * Compared element by element rather than as a joined string, so that an
+ * argument containing a space cannot be made to look like two arguments.
+ */
+export function sameCommand(a, b) {
+  if (a.length !== b.length) return false;
+  return a.every((value, index) => value === b[index]);
+}
+
 function summarise(result, argv) {
   return {
     command: argv.join(' '),
@@ -133,8 +144,25 @@ export async function verifyDiff({
     const { writeFile } = await import('node:fs/promises');
     await writeFile(absolute, contents, 'utf8');
   };
+  // A diff may delete a file. Deleting it is not the same as emptying it, so
+  // the file system is asked to unlink it and the restore path puts it back.
+  const removeFileFor = async (absolute) => {
+    const { rm } = await import('node:fs/promises');
+    await rm(absolute, { force: true });
+  };
 
-  const plan = await resolvePlan({ files, readFile: reader.readFile });
+  // The files the plan resolution reads are the files that decide what the
+  // command is: the manifest that names the test script, and whichever
+  // runner configuration the adapter consulted. They are tracked here so that
+  // the same question can be asked again after the patch has been applied.
+  const commandInputs = new Map();
+  const trackingRead = async (relative) => {
+    const text = await reader.readFile(relative);
+    commandInputs.set(relative, text);
+    return text;
+  };
+
+  const plan = await resolvePlan({ files, readFile: trackingRead });
 
   const finish = (status, code, detail, extra = {}) => ({
     status,
@@ -154,6 +182,7 @@ export async function verifyDiff({
       checkoutRoot,
       readFile: readFileFor,
       writeFile: writeFileFor,
+      removeFile: removeFileFor,
     });
 
   if (!plan.supported) {
@@ -232,6 +261,63 @@ export async function verifyDiff({
       baseline: summarise(baseline, argv),
       files: applied.changed,
     });
+  }
+
+  // A patch that changes what the run *is* proves nothing either.
+  //
+  // The plan was resolved from the unmodified checkout, so `argv` is already
+  // fixed - but the command it names reads the checkout to decide what to do.
+  // `npm test` runs whatever `scripts.test` says; `vitest` reads
+  // vitest.config.js. A patch that rewrites one of those files can turn "the
+  // failing test now passes" into "a different, easier test now passes", and
+  // the exit codes would look identical.
+  //
+  // So the plan is resolved again from the patched tree, and the files that
+  // decided the command are compared. The comparison is on the *content* of
+  // those files, not on the resulting argv: `npm test` stays `npm test` when
+  // the script it runs is rewritten, so comparing the argv alone would miss
+  // exactly the case that matters.
+  const patchedFiles = await reader.listFiles();
+  const patchedInputs = new Map();
+  const patchedTrackingRead = async (relative) => {
+    const text = await reader.readFile(relative);
+    patchedInputs.set(relative, text);
+    return text;
+  };
+  const patchedPlan = await resolvePlan({ files: patchedFiles, readFile: patchedTrackingRead });
+
+  if (!patchedPlan.supported) {
+    return finish(
+      'UNVERIFIED',
+      'PATCH_CHANGES_TEST_COMMAND',
+      'the patched checkout no longer has a runnable test command',
+      { baseline: summarise(baseline, argv), files: applied.changed },
+    );
+  }
+
+  const changedInputs = [...new Set([...commandInputs.keys(), ...patchedInputs.keys()])].filter(
+    (relative) => (commandInputs.get(relative) ?? null) !== (patchedInputs.get(relative) ?? null),
+  );
+  if (changedInputs.length > 0) {
+    return finish(
+      'UNVERIFIED',
+      'PATCH_CHANGES_TEST_COMMAND',
+      `the patched checkout would run a different command (${changedInputs.join(', ')} changed)`,
+      { baseline: summarise(baseline, argv), files: applied.changed },
+    );
+  }
+
+  const patchedArgv = planArgv(patchedPlan);
+  if (!sameCommand(argv, patchedArgv) || patchedPlan.displayCommand !== plan.displayCommand) {
+    return finish(
+      'UNVERIFIED',
+      'PATCH_CHANGES_TEST_COMMAND',
+      `the patched checkout would run "${patchedPlan.displayCommand}" instead of "${plan.displayCommand}"`,
+      {
+        baseline: summarise(baseline, argv),
+        files: applied.changed,
+      },
+    );
   }
 
   // --- the same command, after the patch ------------------------------------

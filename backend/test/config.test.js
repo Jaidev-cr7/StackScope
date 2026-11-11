@@ -43,6 +43,7 @@ const BASELINE = {
   EXECUTION_SETUP_TIMEOUT_MS: '600000',
   DATABASE_PATH: '',
   SANDBOX_ROOT: '',
+  TRUST_PROXY: '',
   LOG_LEVEL: 'info',
 };
 
@@ -64,6 +65,7 @@ function loadConfig(overrides = {}) {
       cookieSecure: config.cookieSecure,
       jwtTtlSeconds: config.jwtTtlSeconds,
       logLevel: config.logLevel,
+      trustProxy: config.trustProxy,
       llm: { mode: config.llm.mode, model: config.llm.model, fallbackModel: config.llm.fallbackModel, reasoningLevel: config.llm.reasoningLevel },
       github: { mode: config.github.mode, apiUrl: config.github.apiUrl },
       execution: { allowed: config.execution.allowed, requireIsolation: config.execution.requireIsolation, timeoutMs: config.execution.timeoutMs },
@@ -115,6 +117,23 @@ describe('the defaults', () => {
     expect(config.github.mode).toBe('replay');
     expect(config.execution.allowed).toBe(false);
     expect(config.execution.requireIsolation).toBe(false);
+    // No proxy is trusted by default, so X-Forwarded-For is ignored and the
+    // client address is the socket address.
+    expect(config.trustProxy).toBe(0);
+  });
+
+  it('trusts the number of proxy hops it is told to trust', () => {
+    expect(loadOk({ TRUST_PROXY: '1' }).trustProxy).toBe(1);
+    expect(loadOk({ TRUST_PROXY: '2' }).trustProxy).toBe(2);
+    expect(loadOk({ TRUST_PROXY: 'false' }).trustProxy).toBe(0);
+  });
+
+  it('refuses to trust the forwarding header unconditionally', () => {
+    // `true` would let a client that reaches the application directly choose
+    // the address the rate limits are keyed on.
+    const result = loadConfig({ TRUST_PROXY: 'true' });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/TRUST_PROXY/);
   });
 
   it('treats an empty value as unset', () => {

@@ -410,6 +410,110 @@ describe('verifyDiff', () => {
   });
 });
 
+describe('a diff that deletes and creates files', () => {
+  const removeFileAt = async (absolute) => {
+    const { rm } = await import('node:fs/promises');
+    await rm(absolute, { force: true });
+  };
+
+  it('deletes the file a diff says is gone', async () => {
+    const { checkout } = await makeCheckout('apply-delete');
+    const deletion = [
+      '--- a/src/cart.js',
+      '+++ /dev/null',
+      '@@ -1,7 +0,0 @@',
+      '-export function cartTotal(items) {',
+      '-  let sum = 0;',
+      '-  for (const item of items) {',
+      '-    sum += item.price;',
+      '-  }',
+      '-  return sum;',
+      '-}',
+      '',
+    ].join('\n');
+
+    const result = await applyUnifiedDiff(deletion, {
+      checkoutRoot: checkout,
+      readFile: readFileAt,
+      writeFile: writeFileAt,
+      removeFile: removeFileAt,
+    });
+
+    expect(result.applied).toBe(true);
+    expect(result.changed).toEqual(['src/cart.js']);
+    // The file is gone, not left behind as a zero-byte file.
+    await expect(readFile(path.join(checkout, 'src', 'cart.js'), 'utf8')).rejects.toThrow();
+  });
+
+  it('removes a created file again when a later file of the diff fails', async () => {
+    const { checkout } = await makeCheckout('apply-restore');
+    const creation = [
+      '--- /dev/null',
+      '+++ b/src/extra.js',
+      '@@ -0,0 +1,1 @@',
+      '+export const extra = 1;',
+      '',
+    ].join('\n');
+    const badPatch = [
+      '--- a/src/cart.js',
+      '+++ b/src/cart.js',
+      '@@ -1,2 +1,2 @@',
+      ' export function cartTotal(items) {',
+      '-  this line does not exist in the file;',
+      '+  replaced;',
+      '',
+    ].join('\n');
+
+    const result = await applyUnifiedDiff(`${creation}${badPatch}`, {
+      checkoutRoot: checkout,
+      readFile: readFileAt,
+      writeFile: writeFileAt,
+      removeFile: removeFileAt,
+    });
+
+    expect(result.applied).toBe(false);
+    // The file the diff created is not left behind: the checkout is exactly
+    // as it was.
+    await expect(readFile(path.join(checkout, 'src', 'extra.js'), 'utf8')).rejects.toThrow();
+  });
+});
+
+describe('a patch that changes what the run does', () => {
+  it('refuses a patch that rewrites the test command', async () => {
+    // The plan is resolved from the unmodified checkout, so the command is
+    // already fixed. But the command reads the checkout to decide what to do,
+    // so a patch that rewrites package.json can change what is actually run.
+    // The verification resolves the plan again after applying the patch and
+    // refuses when the two differ.
+    const { root, checkout } = await makeCheckout('verify-command-change');
+
+    const packageEdit = [
+      '--- a/package.json',
+      '+++ b/package.json',
+      '@@ -5,5 +5,5 @@',
+      '   "type": "module",',
+      '   "scripts": {',
+      '-    "test": "node --test"',
+      '+    "test": "node --test --test-name-pattern nothing_matches_this"',
+      '   }',
+      ' }',
+      '',
+    ].join('\n');
+
+    const result = await verifyDiff({
+      checkoutRoot: checkout,
+      diffText: packageEdit,
+      executionAllowed: true,
+      globalExecutionAllowed: true,
+      sandboxRoot: root,
+    });
+
+    expect(result.status).toBe('UNVERIFIED');
+    expect(result.reasonCode).toBe('PATCH_CHANGES_TEST_COMMAND');
+    expect(result.patched).toBeNull();
+  });
+});
+
 describe('the GitHub client', () => {
   it('accepts a workflow run URL and nothing else', () => {
     expect(parseRunUrl('https://github.com/acme/widgets/actions/runs/42')).toEqual({

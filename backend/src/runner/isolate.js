@@ -17,9 +17,17 @@
 // fallback is reported, so a verification result always says which of the two
 // produced it - a VERIFIED patch verified without isolation is still a
 // verified patch, but the reader is entitled to know.
+//
+// In production the fallback is not used at all. The local sandbox contains
+// the paths such code can reach but not the process it can start, so running
+// untrusted code that way on a production host is not acceptable; the run
+// fails instead, and the server refuses to start in the first place when
+// execution is enabled and no container runtime is there.
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 
+import { config } from '../config.js';
 import { logger } from '../logger.js';
 import { runCommand, ExecutionError } from './execute.js';
 
@@ -95,9 +103,17 @@ export function runIsolated({
     );
   }
 
+  // The container gets a name of its own so that a timeout can stop *it*.
+  // Killing the `docker run` client would only close the pipe; the container
+  // would keep running - with the checkout mounted and the pids-limit still
+  // in force - until it finished on its own.
+  const containerName = `stackscope-${randomUUID().slice(0, 12)}`;
+
   const dockerArgv = [
     'run',
     '--rm',
+    '--name',
+    containerName,
     '--network',
     'none',
     '--read-only',
@@ -113,8 +129,23 @@ export function runIsolated({
     String(pids),
     '--tmpfs',
     '/tmp:rw,noexec,nosuid,size=64m',
+    // The workspace is mounted read-write, and deliberately so.
+    //
+    // The install step runs on the host (the container has no network), and it
+    // writes node_modules into this same directory - so the directory is
+    // already host-writable before the container starts. Mounting it read-only
+    // would then break any test command that writes into the tree (a cache
+    // directory, a snapshot update, a coverage report): it would fail with
+    // EROFS and be reported as PATCHED_FAILED, which blames the patch for
+    // something the patch did not do.
+    //
+    // What that costs is bounded: the checkout is a disposable per-run copy
+    // that the worker throws away afterwards, and the container still has no
+    // network, a read-only root filesystem, no capabilities and a process
+    // limit. The container can scribble over the copy it was given and
+    // nothing else.
     '--volume',
-    `${resolvedCwd}:/workspace:ro`,
+    `${resolvedCwd}:/workspace:rw`,
     '--workdir',
     '/workspace',
     image,
@@ -140,6 +171,18 @@ export function runIsolated({
 
     const timer = setTimeout(() => {
       timedOut = true;
+      // Stop the container, not just the client. `docker rm -f` kills the
+      // container and removes it; the client is then killed so that the
+      // capture pipes close and the run reports a timeout.
+      try {
+        const stopper = spawn(dockerBin, ['rm', '-f', containerName], {
+          shell: false,
+          stdio: 'ignore',
+        });
+        stopper.on('error', () => {});
+      } catch {
+        // The container will be cleaned up by its own --rm when it exits.
+      }
       child.kill('SIGKILL');
     }, timeoutMs);
 
@@ -170,15 +213,49 @@ export function runIsolated({
  * sandbox when it is not.
  *
  * The result always carries which one ran it.
+ *
+ * When the installation requires isolation - which it does in production -
+ * there is no fallback. The local sandbox contains the *paths* a checkout can
+ * reach but not the *process* it can start, so it is not an acceptable way to
+ * run untrusted code on a production host. If the container cannot be used,
+ * the run fails rather than quietly becoming an unsandboxed one.
  */
 export async function runIsolatedOrLocal(options) {
-  if (await isDockerAvailable()) {
+  return runWithIsolationPolicy(options);
+}
+
+/**
+ * The same thing, with the isolation policy stated rather than read from the
+ * configuration.
+ *
+ * The policy is a parameter so that the decision - container or nothing - can
+ * be tested directly, without a production environment and a container
+ * runtime having to be arranged to exercise it.
+ */
+export async function runWithIsolationPolicy(
+  options,
+  { requireIsolation = config.execution.requireIsolation, dockerAvailable = null } = {},
+) {
+  const containerAvailable = dockerAvailable === null ? await isDockerAvailable() : dockerAvailable;
+  if (containerAvailable) {
     try {
       return await runIsolated(options);
     } catch (error) {
-      logger.warn({ err: error }, 'the container runner failed; falling back to the local sandbox');
+      logger.warn({ err: error }, 'the container runner failed');
+      if (requireIsolation) throw error;
+      logger.warn('falling back to the local sandbox');
     }
   }
+
+  if (requireIsolation) {
+    throw new ExecutionError(
+      'No container runtime is available, and this installation requires isolation for ' +
+        'repository execution. The local sandbox contains the paths a checkout can reach but ' +
+        'not the process it can start, so it is not used here.',
+      'ISOLATION_REQUIRED',
+    );
+  }
+
   const result = await runCommand(options);
   return { ...result, isolation: 'local' };
 }

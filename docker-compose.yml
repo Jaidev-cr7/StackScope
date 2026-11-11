@@ -32,6 +32,10 @@ services:
       DATABASE_PATH: /var/lib/ci-investigator/app.db
       SANDBOX_ROOT: /var/lib/ci-investigator/sandbox
       LLM_CACHE_DIR: /var/lib/ci-investigator/llm-cache
+      # The frontend's nginx is the only way into the backend - the backend's
+      # port is not published to the host - so exactly one proxy hop is in
+      # front of the application, and nginx overwrites X-Forwarded-For.
+      TRUST_PROXY: 1
     volumes:
       # The database, the sandbox and the recording cache. This is the
       # application's state, so it has to survive a restart.

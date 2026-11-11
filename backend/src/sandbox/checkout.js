@@ -8,7 +8,7 @@
 // reaches the filesystem: the paths are resolved against the checkout root and
 // re-checked, and a symlink is resolved before the read so a link inside the
 // checkout cannot point out of it.
-import { readdir, readFile } from 'node:fs/promises';
+import { readdir } from 'node:fs/promises';
 import path from 'node:path';
 
 import { resolveInside, resolveRealInside, readTextFileInside, isExcludedPath, isSecretPath, isBinaryPath } from '../security/paths.js';
@@ -31,6 +31,9 @@ const MAX_FILES = 5_000;
 
 /** The largest file the tool surface will read. */
 const MAX_READ_BYTES = 200_000;
+
+/** The longest search pattern the tool surface will compile. */
+const MAX_PATTERN_LENGTH = 200;
 
 /**
  * List the repository-relative paths of a checkout.
@@ -81,6 +84,11 @@ export function createCheckoutReader(root) {
     root,
 
     async readFile(relative) {
+      // A secret-looking file is not readable, even by an explicit path. The
+      // listing excludes them, but the listing is not the only way in:
+      // without this check the model could simply ask for `.env` by name.
+      if (isSecretPath(relative)) return null;
+
       try {
         // `readTextFileInside` resolves the path, follows symlinks and
         // re-checks containment before it opens anything.
@@ -96,17 +104,27 @@ export function createCheckoutReader(root) {
     },
 
     async searchFiles(pattern, limit = 20) {
-      const re = new RegExp(pattern, 'i');
+      // The pattern comes from the model, so it is bounded: a pathological
+      // regular expression is a denial of service against the worker.
+      if (typeof pattern !== 'string' || pattern.length === 0) return { error: 'invalid pattern' };
+      if (pattern.length > MAX_PATTERN_LENGTH) return { error: 'the pattern is too long' };
+
+      let re;
+      try {
+        re = new RegExp(pattern, 'i');
+      } catch (error) {
+        return { error: `invalid pattern: ${error.message}` };
+      }
+
       const files = await listCheckoutFiles(root);
       const matches = [];
       for (const file of files) {
         if (matches.length >= limit) break;
-        let text;
-        try {
-          text = await readFile(path.join(root, file), 'utf8');
-        } catch {
-          continue;
-        }
+        // The search reads through the same contained reader as read_file, so
+        // it inherits the size cap and the secret-file exclusion rather than
+        // bypassing them.
+        const text = await this.readFile(file);
+        if (text === null) continue;
         const lines = text.split(/\r?\n/);
         for (let i = 0; i < lines.length && matches.length < limit; i += 1) {
           if (re.test(lines[i])) {

@@ -110,8 +110,20 @@ export function createToolExecutor({ checkoutRoot, readFile, listFiles, searchFi
   const calls = [];
 
   async function readOne(relative) {
-    const absolute = resolveInside(checkoutRoot, relative);
-    const text = await readFile(absolute);
+    // The path is validated here, and read through the checkout reader.
+    //
+    // The validation rejects an absolute path and a `..` segment. It cannot
+    // do the full job - following a symlink and re-checking the resolved
+    // path is the reader's job - but it means a reader that is handed
+    // something absurd never sees it.
+    //
+    // What is passed to the reader is the *relative* path, because that is
+    // the reader's contract: it resolves the path itself, follows symlinks
+    // and re-checks containment. Handing it an absolute path would make
+    // every read fail, because an absolute path is exactly what the reader
+    // refuses to resolve.
+    resolveInside(checkoutRoot, relative);
+    const text = await readFile(relative);
     if (text === null || text === undefined) return null;
     return text.length > 20_000 ? `${text.slice(0, 20_000)}\n… [truncated]` : text;
   }

@@ -10,9 +10,10 @@ import { z } from 'zod';
 import { getDb } from '../db/index.js';
 import * as users from '../db/repos/users.js';
 import * as audit from '../db/repos/audit.js';
-import { hashPassword, verifyPassword } from './passwords.js';
+import { hashPassword, verifyPassword, DUMMY_HASH } from './passwords.js';
 import { signToken, setSessionCookie, clearSessionCookie } from './tokens.js';
 import { requireAuth } from './middleware.js';
+import { asyncHandler } from '../http/asyncHandler.js';
 import { logger } from '../logger.js';
 
 const emailSchema = z
@@ -70,7 +71,7 @@ export function authRoutes({ db = getDb(), limiters = createAuthLimiters() } = {
   const { authLimiter, registerLimiter } = limiters;
   const router = Router();
 
-  router.post('/register', registerLimiter, async (req, res) => {
+  router.post('/register', registerLimiter, asyncHandler(async (req, res) => {
     const parsed = registerSchema.safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({
@@ -90,15 +91,30 @@ export function authRoutes({ db = getDb(), limiters = createAuthLimiters() } = {
     }
 
     const passwordHash = await hashPassword(password);
-    const user = users.createUser(db, { email, passwordHash });
+
+    let user;
+    try {
+      user = users.createUser(db, { email, passwordHash });
+    } catch (error) {
+      // The check above is a check-then-act, so two concurrent registrations
+      // of the same email can both pass it. The database is the arbiter, and
+      // the answer is still a 409 - not a 500.
+      if (error?.code === 'EMAIL_TAKEN') {
+        return res.status(409).json({
+          error: 'email_taken',
+          message: 'An account with that email already exists.',
+        });
+      }
+      throw error;
+    }
     audit.record(db, { userId: user.id, action: audit.AUDIT_ACTIONS.USER_REGISTERED, metadata: { email } });
 
     setSessionCookie(res, signToken(user.id));
     logger.info({ userId: user.id }, 'user registered');
     return res.status(201).json({ user: users.toPublicUser(user) });
-  });
+  }));
 
-  router.post('/login', authLimiter, async (req, res) => {
+  router.post('/login', authLimiter, asyncHandler(async (req, res) => {
     const parsed = loginSchema.safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({ error: 'invalid_input', message: 'Email and password are required.' });
@@ -108,9 +124,11 @@ export function authRoutes({ db = getDb(), limiters = createAuthLimiters() } = {
     const row = users.findUserByEmail(db, email);
 
     // Always spend a bcrypt comparison so response time does not reveal
-    // whether the account exists. A fixed dummy hash is used when there is no
-    // user, otherwise the miss path returns in microseconds.
-    const hash = row?.password_hash ?? '$2a$10$invalidinvalidinvalidinvalidinvalidinvalidinvalidinvalidinva';
+    // whether the account exists. The dummy is a real hash at the real cost
+    // factor, so the miss path costs the same as the hit path; a malformed
+    // placeholder would be rejected by bcrypt immediately and turn this into
+    // a timing oracle for account enumeration.
+    const hash = row?.password_hash ?? DUMMY_HASH;
     const ok = await verifyPassword(password, hash);
 
     if (!row || !ok) {
@@ -128,7 +146,7 @@ export function authRoutes({ db = getDb(), limiters = createAuthLimiters() } = {
     setSessionCookie(res, signToken(user.id));
     logger.info({ userId: user.id }, 'user logged in');
     return res.json({ user });
-  });
+  }));
 
   router.post('/logout', (req, res) => {
     if (req.userId) {

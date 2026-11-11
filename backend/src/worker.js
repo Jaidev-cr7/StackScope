@@ -40,6 +40,7 @@ import { validateCitations } from './agent/citations.js';
 import { verifyDiff } from './patch/verify.js';
 import { reason as reasonFor } from './domain/patchStatus.js';
 import { createCheckoutReader } from './sandbox/checkout.js';
+import { redactSecrets } from './security/redact.js';
 import { fixtureRepoPath, fixtureLogPath } from './fixtures/catalog.js';
 
 /** Append a timeline entry and the matching event in one place. */
@@ -194,6 +195,20 @@ export async function investigateRun(db, { runId, userId, overrides = {} }) {
     if (!logText) {
       throw new Error(`No CI log is available for "${sourceRef}".`);
     }
+
+    // The log is scrubbed once, here, and everything downstream uses the
+    // scrubbed copy.
+    //
+    // A CI log is untrusted input from a third party's pipeline, and it very
+    // often contains something that looks exactly like a credential: a
+    // registry URL with a password in it, an `::set-output` line, a token
+    // echoed by a failing step. The raw log would be stored in the run's
+    // history, returned to the browser over the API, and sent to the model
+    // provider - three places it should never reach.
+    //
+    // Redaction preserves the line count, so the line numbers the analysis
+    // reports still point at the right lines of the original log.
+    logText = redactSecrets(logText);
 
     events.appendEvent(db, { runId, userId, type: 'log.ready', payload: { bytes: logText.length } });
     record(db, {
@@ -389,6 +404,22 @@ export async function investigateRun(db, { runId, userId, overrides = {} }) {
 }
 
 /**
+ * How long a claimed job stays claimed, and how often the claim is renewed.
+ *
+ * A verification job can run for a long time: the install step, then the
+ * baseline test run, then the patched test run, each with its own timeout.
+ * A lease that expired in the middle of that would let a second worker - or
+ * the recovery pass at boot - pick the job up and run it again while the
+ * first attempt was still going.
+ *
+ * So the lease is generous and it is renewed while the job runs. A worker that
+ * dies stops renewing, its lease lapses, and the job is recovered; a worker
+ * that is alive keeps the lease ahead of it.
+ */
+const LEASE_MS = 15 * 60_000;
+const LEASE_RENEW_INTERVAL_MS = 60_000;
+
+/**
  * The polling loop.
  *
  * One job at a time, claimed with a database lease, so two workers (or a
@@ -408,7 +439,7 @@ export function startWorker({ db, pollIntervalMs = 500, leaseOwner = `worker-${p
   async function tick() {
     if (!running) return;
     try {
-      const job = jobsRepo.claimNext(db, { leaseOwner, leaseMs: 120_000, kinds: ['investigate'] });
+      const job = jobsRepo.claimNext(db, { leaseOwner, leaseMs: LEASE_MS, kinds: ['investigate'] });
       if (!job) return;
 
       // The job row does not carry the owner; the run it belongs to does.
@@ -419,10 +450,25 @@ export function startWorker({ db, pollIntervalMs = 500, leaseOwner = `worker-${p
       }
 
       logger.info({ jobId: job.id, runId: job.run_id }, 'job claimed');
-      const result = await investigateRun(db, { runId: job.run_id, userId: run.user_id });
 
-      if (result.ok) jobsRepo.completeJob(db, job.id);
-      else jobsRepo.completeJob(db, job.id, { error: result.error });
+      // Keep the lease fresh for as long as the work lasts.
+      const renew = setInterval(() => {
+        try {
+          jobsRepo.renewLease(db, job.id, leaseOwner, LEASE_MS);
+        } catch (error) {
+          logger.warn({ err: error, jobId: job.id }, 'could not renew the job lease');
+        }
+      }, LEASE_RENEW_INTERVAL_MS);
+      renew.unref?.();
+
+      try {
+        const result = await investigateRun(db, { runId: job.run_id, userId: run.user_id });
+
+        if (result.ok) jobsRepo.completeJob(db, job.id);
+        else jobsRepo.completeJob(db, job.id, { error: result.error });
+      } finally {
+        clearInterval(renew);
+      }
     } catch (error) {
       logger.error({ err: error }, 'worker tick failed');
     }

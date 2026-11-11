@@ -28,10 +28,10 @@ export const TERMINAL_STATES = Object.freeze(['COMPLETED', 'FAILED', 'CANCELLED'
 const TRANSITIONS = {
   CREATED: ['QUEUED', 'FAILED', 'CANCELLED'],
   QUEUED: ['FETCHING_SOURCE', 'FAILED', 'CANCELLED'],
-  FETCHING_SOURCE: ['INVESTIGATING', 'FAILED', 'CANCELLED'],
-  INVESTIGATING: ['PATCH_PROPOSED', 'COMPLETED', 'FAILED', 'CANCELLED'],
-  PATCH_PROPOSED: ['VALIDATING', 'COMPLETED', 'FAILED', 'CANCELLED'],
-  VALIDATING: ['COMPLETED', 'FAILED', 'CANCELLED'],
+  FETCHING_SOURCE: ['INVESTIGATING', 'QUEUED', 'FAILED', 'CANCELLED'],
+  INVESTIGATING: ['PATCH_PROPOSED', 'COMPLETED', 'FAILED', 'CANCELLED', 'QUEUED'],
+  PATCH_PROPOSED: ['VALIDATING', 'COMPLETED', 'FAILED', 'CANCELLED', 'QUEUED'],
+  VALIDATING: ['COMPLETED', 'FAILED', 'CANCELLED', 'QUEUED'],
   // A tracked GitHub workflow starts life in TRACKING and may fail the import
   // before it ever reaches QUEUED.
   TRACKING: ['FETCHING_SOURCE', 'TRACKING_EXPIRED', 'FAILED', 'CANCELLED'],
@@ -40,6 +40,16 @@ const TRANSITIONS = {
   FAILED: [],
   CANCELLED: [],
 };
+
+// The `-> QUEUED` edges above are the retry path.
+//
+// A job whose worker died is recovered at boot: it goes back on the queue and
+// is run again from the top. The run it belongs to is then sitting in a
+// non-terminal state - INVESTIGATING, say - and the retry has to be able to
+// put it back on the queue. Without those edges the retry throws
+// ILLEGAL_TRANSITION on its very first transition, the job fails, and the run
+// stays in INVESTIGATING forever: a run that never finishes and never says
+// why it stopped.
 
 export function canTransition(from, to) {
   if (from === to) return true;

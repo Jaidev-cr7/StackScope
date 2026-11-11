@@ -56,6 +56,19 @@ export async function assertRuntimeIsCapable() {
 export async function startServer({ port = config.port, db = getDb() } = {}) {
   await assertRuntimeIsCapable();
 
+  // A rejection that reaches here is a bug, and it must not take the process
+  // down with it. Node's default is to terminate, which turns an unhandled
+  // error into an outage; the route handlers are all wrapped so this should
+  // never fire, but the consequence of it firing is too high to leave to the
+  // default.
+  process.on('unhandledRejection', (reason) => {
+    logger.error({ err: reason }, 'unhandled rejection');
+  });
+  process.on('uncaughtException', (error) => {
+    logger.fatal({ err: error }, 'uncaught exception; shutting down');
+    process.exit(1);
+  });
+
   const app = createApp({ db });
 
   // A job that was running when the process died belongs to nobody now. Its

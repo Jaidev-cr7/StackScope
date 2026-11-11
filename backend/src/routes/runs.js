@@ -32,6 +32,8 @@ import { listFixtures, findFixture } from '../fixtures/catalog.js';
 import { importWorkflowRun } from '../github/import.js';
 import { GitHubError } from '../github/client.js';
 import { ApiError } from '../http/errors.js';
+import { asyncHandler } from '../http/asyncHandler.js';
+import { redactSecrets } from '../security/redact.js';
 
 const createRunSchema = z
   .object({
@@ -64,13 +66,13 @@ export function runRoutes({ db = getDb() } = {}) {
   router.use(requireAuth(db));
 
   /** The fixtures available to investigate. Public shape only. */
-  router.get('/fixtures', async (_req, res, next) => {
+  router.get('/fixtures', asyncHandler(async (_req, res, next) => {
     try {
       res.json({ fixtures: await listFixtures() });
     } catch (error) {
       next(error);
     }
-  });
+  }));
 
   router.get('/', (req, res) => {
     const query = listQuerySchema.safeParse(req.query);
@@ -82,7 +84,7 @@ export function runRoutes({ db = getDb() } = {}) {
     res.json({ runs: rows.map(runs.toPublicRun), total, limit, offset });
   });
 
-  router.post('/', async (req, res, next) => {
+  router.post('/', asyncHandler(async (req, res, next) => {
     try {
       const parsed = createRunSchema.safeParse(req.body ?? {});
       if (!parsed.success) {
@@ -132,7 +134,11 @@ export function runRoutes({ db = getDb() } = {}) {
           seq: steps.nextSeq(db, run.id),
           kind: 'log',
           title: 'CI log downloaded',
-          detail: imported.logText,
+          // The log is scrubbed before it is stored. It comes from a third
+          // party's pipeline and routinely contains something that looks like
+          // a credential, and this copy is read back by the API and sent to
+          // the model provider.
+          detail: redactSecrets(imported.logText),
         });
 
         jobPayload = { runUrl: parsed.data.runUrl, owner: imported.owner, repo: imported.repo };
@@ -190,7 +196,7 @@ export function runRoutes({ db = getDb() } = {}) {
       }
       next(error);
     }
-  });
+  }));
 
   router.get('/:runId', loadOwnedRun(db), (req, res) => {
     const run = req.run;

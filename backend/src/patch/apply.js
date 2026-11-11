@@ -116,9 +116,10 @@ export function parseDiff(diffText) {
  * @param {string} options.checkoutRoot  absolute path of the checkout
  * @param {(absolutePath: string) => Promise<string|null>} options.readFile
  * @param {(absolutePath: string, contents: string) => Promise<void>} options.writeFile
+ * @param {(absolutePath: string) => Promise<void>} [options.removeFile]
  * @returns {Promise<{applied: boolean, reason: string|null, files: string[], changed: string[]}>}
  */
-export async function applyUnifiedDiff(diffText, { checkoutRoot, readFile, writeFile }) {
+export async function applyUnifiedDiff(diffText, { checkoutRoot, readFile, writeFile, removeFile }) {
   if (typeof diffText !== 'string' || diffText.trim() === '') {
     return { applied: false, reason: 'invalid_diff', files: [], changed: [] };
   }
@@ -136,7 +137,16 @@ export async function applyUnifiedDiff(diffText, { checkoutRoot, readFile, write
   // Plan first: resolve every path before touching anything.
   const targets = [];
   for (const patch of patches) {
-    const relative = stripDiffPrefix(patch.newFileName) ?? stripDiffPrefix(patch.oldFileName);
+    // A deletion names the file in the `---` line and writes `/dev/null` in
+    // the `+++` line; a creation is the other way round. The path is
+    // whichever of the two is a real path, and the other one says what kind
+    // of change this is.
+    const newName = stripDiffPrefix(patch.newFileName);
+    const oldName = stripDiffPrefix(patch.oldFileName);
+    const isDeletion = newName === '/dev/null';
+    const isCreation = oldName === '/dev/null';
+
+    const relative = isDeletion ? oldName : newName ?? oldName;
     if (!relative || relative === '/dev/null') {
       return { applied: false, reason: 'invalid_diff', files: [], changed: [] };
     }
@@ -149,7 +159,7 @@ export async function applyUnifiedDiff(diffText, { checkoutRoot, readFile, write
       }
       throw error;
     }
-    targets.push({ patch, relative, absolute });
+    targets.push({ patch, relative, absolute, isDeletion, isCreation });
   }
 
   const originals = new Map();
@@ -157,13 +167,18 @@ export async function applyUnifiedDiff(diffText, { checkoutRoot, readFile, write
 
   try {
     for (const target of targets) {
-      const source = (await readFile(target.absolute)) ?? '';
-      originals.set(target.absolute, source);
+      const existing = await readFile(target.absolute);
+      const source = existing ?? '';
+      // `null` in the restore map means "this file did not exist", which is a
+      // different thing from "this file was empty". A creation restores by
+      // removing the file again; an empty file restores by being written
+      // back empty.
+      originals.set(target.absolute, existing);
 
       const result = applyPatch(source, target.patch);
       if (result === false) {
         // Not applied: restore what was written so far and report the refusal.
-        await restore(originals, writeFile);
+        await restore(originals, writeFile, removeFile);
         return {
           applied: false,
           reason: `patch_did_not_apply: ${target.relative}`,
@@ -171,11 +186,19 @@ export async function applyUnifiedDiff(diffText, { checkoutRoot, readFile, write
           changed: [],
         };
       }
-      await writeFile(target.absolute, result);
+
+      if (target.isDeletion) {
+        // The diff says the file is gone, so the file goes. Writing an empty
+        // file instead would leave a zero-byte file that the project would
+        // then have to cope with.
+        await remove(target.absolute, removeFile);
+      } else {
+        await writeFile(target.absolute, result);
+      }
       changed.push(target.relative);
     }
   } catch (error) {
-    await restore(originals, writeFile);
+    await restore(originals, writeFile, removeFile);
     throw error;
   }
 
@@ -187,11 +210,33 @@ export async function applyUnifiedDiff(diffText, { checkoutRoot, readFile, write
   };
 }
 
+/**
+ * Delete a file.
+ *
+ * `removeFile` is optional so the module can still be driven by a fake in the
+ * tests; without it the file is emptied, which is the closest thing to
+ * deleting it that a write-only interface can do.
+ */
+async function remove(absolute, removeFile) {
+  if (typeof removeFile === 'function') {
+    await removeFile(absolute);
+    return;
+  }
+  const { writeFile } = await import('node:fs/promises');
+  await writeFile(absolute, '', 'utf8');
+}
+
 /** Put the files back the way they were. Used when a later file fails. */
-async function restore(originals, writeFile) {
+async function restore(originals, writeFile, removeFile) {
   for (const [absolute, contents] of originals) {
     try {
-      await writeFile(absolute, contents);
+      if (contents === null) {
+        // The file did not exist before the patch, so it must not exist now.
+        if (typeof removeFile === 'function') await removeFile(absolute);
+        else await writeFile(absolute, '');
+      } else {
+        await writeFile(absolute, contents);
+      }
     } catch {
       // Best effort: the caller is already reporting a failure.
     }

@@ -23,6 +23,8 @@ import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
 import { z } from 'zod';
 
+import { registerSecret } from './security/redact.js';
+
 export const backendRoot = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 export const repoRoot = path.resolve(backendRoot, '..');
 
@@ -105,7 +107,17 @@ const httpUrl = (label) =>
     }, `${label} must be an http or https URL`);
 
 const envSchema = z.object({
-  NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+  NODE_ENV: z
+    .enum(['development', 'test', 'production'], {
+      errorMap: () => ({
+        message:
+          "must be 'development', 'test' or 'production'. " +
+          "'prod' is not accepted: the production checks - the secret checks, the Secure " +
+          'cookie, the refusal to run untrusted code without a container - run only for the ' +
+          "exact value 'production'.",
+      }),
+    })
+    .default('development'),
   // Port 0 means "any free port", which is a test-only convenience and is
   // never what a deployed server wants.
   PORT: z.coerce.number().int().min(1).max(65535).default(4000),
@@ -136,6 +148,45 @@ const envSchema = z.object({
 
   DATABASE_PATH: optionalString(),
   SANDBOX_ROOT: optionalString(),
+
+  // How many proxy hops sit in front of this application.
+  //
+  // 0 - the default - means "none": the client address is the socket
+  // address and the X-Forwarded-For header is ignored completely. A number
+  // means "trust that many hops".
+  //
+  // "true" is deliberately not accepted. Trusting the header without
+  // counting hops lets a client choose its own address by sending the header
+  // itself, and every rate limit in this application is keyed on that
+  // address.
+  TRUST_PROXY: z
+    .string()
+    .trim()
+    .optional()
+    .transform((value, ctx) => {
+      if (value === undefined || value === '') return 0;
+      const lowered = value.toLowerCase();
+      if (lowered === 'false' || lowered === '0') return 0;
+      if (lowered === 'true') {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            'TRUST_PROXY=true is not accepted: it lets a client pick its own address by sending ' +
+            'X-Forwarded-For, and the rate limits are keyed on that address. ' +
+            'Set it to the number of proxy hops in front of this application (0 if there is none).',
+        });
+        return z.NEVER;
+      }
+      const hops = Number(value);
+      if (!Number.isInteger(hops) || hops < 0 || hops > 10) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'TRUST_PROXY must be a number of proxy hops between 0 and 10.',
+        });
+        return z.NEVER;
+      }
+      return hops;
+    }),
 
   LOG_LEVEL: z.enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal', 'silent']).default('info'),
 });
@@ -318,6 +369,7 @@ const jwtSecret = env.JWT_SECRET || DEV_SECRET;
 
 export const config = Object.freeze({
   env: env.NODE_ENV,
+
   isProduction,
   isTest: env.NODE_ENV === 'test',
   port: env.PORT,
@@ -327,6 +379,16 @@ export const config = Object.freeze({
   jwtSecret,
   jwtTtlSeconds: env.JWT_TTL_SECONDS,
   cookieSecure: isProduction,
+
+  /**
+   * How many proxy hops to trust when working out the client's address.
+   *
+   * Zero by default, so the socket address is used and X-Forwarded-For is
+   * ignored. A deployment behind a reverse proxy sets this to the number of
+   * hops, and the proxy must overwrite the header rather than pass the
+   * client's own value through.
+   */
+  trustProxy: env.TRUST_PROXY,
 
   llm: Object.freeze({
     mode: env.LLM_MODE,
@@ -369,6 +431,22 @@ export const config = Object.freeze({
     ? path.resolve(repoRoot, env.SANDBOX_ROOT)
     : path.join(backendRoot, '.tmp'),
 });
+
+// The application's own live secrets are registered with the redactor.
+//
+// The redactor's patterns catch credential *shapes* - a GitHub token, a JWT,
+// an `API_KEY=...` assignment. A secret that does not look like anything in
+// particular - a private repository's deploy key, a token with an unusual
+// prefix - is not a shape the patterns can be taught. But this application
+// knows its own secrets exactly, so they are registered by value: if one of
+// them ever turns up in a CI log, in a file the model reads, or in a line
+// this process writes, it is scrubbed rather than stored, sent or logged.
+//
+// Registering them here means it happens once, at load, before anything can
+// log anything.
+registerSecret(config.llm.apiKey);
+registerSecret(config.github.token);
+registerSecret(config.jwtSecret);
 
 // True when the app could actually reach a live model, and what to tell the
 // user when it cannot. The UI surfaces this rather than silently degrading.

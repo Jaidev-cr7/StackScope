@@ -38,9 +38,16 @@ export function createApp({ db = getDb(), limiters } = {}) {
   const app = express();
 
   // Behind a reverse proxy the client IP arrives in X-Forwarded-For; without
-  // this, the rate limiter sees every request as coming from the proxy and
-  // throttles the whole user base at once.
-  app.set('trust proxy', 1);
+  // trusting it, the rate limiter sees every request as coming from the proxy
+  // and throttles the whole user base at once.
+  //
+  // How many hops to trust is a setting rather than a constant, because
+  // trusting the header unconditionally is a hole: a client that reaches this
+  // application directly can send X-Forwarded-For itself and pick the address
+  // the rate limiter keys on - rotating it per request to get out of every
+  // limit. With no proxy in front the default is zero hops, which ignores the
+  // header entirely.
+  app.set('trust proxy', config.trustProxy);
   app.disable('x-powered-by');
 
   app.use(

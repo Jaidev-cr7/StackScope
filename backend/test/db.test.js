@@ -87,7 +87,17 @@ describe('users', () => {
   it('rejects duplicate emails', () => {
     const db = freshDb();
     seedUser(db);
-    expect(() => seedUser(db)).toThrow(/UNIQUE/i);
+    // The unique-constraint violation is caught and re-thrown as a typed
+    // error, so the route can answer 409 instead of crashing on an unhandled
+    // rejection.
+    let caught = null;
+    try {
+      seedUser(db);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).not.toBeNull();
+    expect(caught.code).toBe('EMAIL_TAKEN');
     db.close();
   });
 });
