@@ -254,6 +254,10 @@ Only `https://github.com/<owner>/<repo>/actions/runs/<numeric id>` is accepted, 
 
 The downloaded archive goes through the same two-pass validation as every other archive — validated in full before a single byte is written.
 
+Imports are **off unless `GITHUB_MODE=live`**. The default, `replay`, means nothing leaves the machine, so an import is refused with an explanation rather than quietly calling the API.
+
+A `GITHUB_TOKEN` is **required for an import to complete**, and not because the repository is private. GitHub lets an anonymous caller read a run's metadata, its jobs and its source archive, but it refuses the *job log* with a 403 — and the log is the thing the whole investigation is about. The token needs no scopes beyond `actions:read` for a public repository, and `repo` for a private one.
+
 **Where it lives:** `backend/src/github/client.js` and `backend/src/github/import.js`.
 
 ### 2.11 Real-time investigation updates
@@ -938,6 +942,34 @@ Open <http://localhost:5173>, create an account, and start an investigation from
 | `npm run eval` | Run the evaluation harness across the eight fixtures. |
 | `npm run check:all` | Run every check and print one PASS/FAIL table. |
 
+### What you actually need to set
+
+Most of the settings are optional, and the ones that are commented out in `.env.example` are commented out because **the default is already the right one**. Uncommenting a line overrides that default — it does not enable a feature that was switched off.
+
+| To do this | Set this | Leave the rest alone |
+|---|---|---|
+| Run the app locally | nothing — `npm run setup` writes `.env` for you | everything |
+| Let the model call the live API | `LLM_MODE=live` and `GEMINI_API_KEY=…` | `GEMINI_API_KEY` alone is not enough: the mode still defaults to `replay` |
+| Verify a patch against a real test run | `ALLOW_REPO_EXECUTION=true` **and** tick the box on the run | the installation-wide flag is only half of it; the per-run consent is the other half |
+| Import a failed GitHub Actions run | `GITHUB_MODE=live` and `GITHUB_TOKEN=…` | the token is needed for the job log, not just for private repositories |
+| Import a private repository | `GITHUB_MODE=live` and a token with the `repo` scope | |
+| Deploy it | `NODE_ENV=production` and a real `JWT_SECRET` | the server refuses to start in production without one |
+| Put it behind a different frontend origin | `FRONTEND_ORIGIN=https://your-host` | |
+| Change the port | `PORT=…` | |
+| See more detail in the logs | `LOG_LEVEL=debug` | |
+
+Two of these deserve a note.
+
+**`GITHUB_MODE` defaults to `replay`, and in that mode an import is refused** — with an explanation, not a silent network call. The default means "nothing leaves this machine", and the code honours that. Set it to `live` to enable imports.
+
+**A `GITHUB_TOKEN` is needed for a GitHub import, and the reason is not obvious.** The metadata, the job list and the source archive are all readable anonymously; the *job log* is not. Since the log is what the analysis is built on, an import without a token cannot be analysed, and the API says so in as many words rather than leaving a bare 403 to decode.
+
+**`GITHUB_WEBHOOK_SECRET` is not used by any route.** There is no webhook endpoint in the application: the schema has a `webhook_deliveries` table for delivery-id deduplication, but nothing writes to it. The setting is there for the table it belongs to, and it can stay commented out.
+
+### About webhooks
+
+Nothing in the application receives a webhook. An investigation is started by a person, from the dashboard, and the GitHub integration is a *pull*: the app reads a run, its job log and its source archive when you ask it to. That is the whole of the GitHub surface — four read-only endpoints, and no way for the application to write to a repository.
+
 ---
 
 ## 10. Configuration reference
@@ -958,9 +990,9 @@ Every variable is read and validated in one place (`backend/src/config.js`), so 
 | `LLM_REASONING_LEVEL` | No | `low` | The reasoning effort to request. |
 | `LLM_CACHE_DIR` | No | `<repo>/.cache/llm` | Where recorded model responses are kept. |
 | `LLM_CACHE_READONLY` | No | `false` | Treats the cache as read-only. |
-| `GITHUB_MODE` | No | `replay` | `live` reads the GitHub API; `replay` never leaves the machine. |
-| `GITHUB_TOKEN` | No | — | Raises the GitHub API rate limit and allows private repositories. |
-| `GITHUB_WEBHOOK_SECRET` | No | — | Secret for verifying inbound webhook signatures. |
+| `GITHUB_MODE` | No | `replay` | `live` enables GitHub imports; `replay` refuses them, so nothing leaves the machine. |
+| `GITHUB_TOKEN` | Required for imports | — | A personal access token with `actions:read` (public repositories) or `repo` (private ones). GitHub refuses the job log without one, so an import cannot be analysed without it. |
+| `GITHUB_WEBHOOK_SECRET` | No | — | Secret for verifying inbound webhook signatures. No webhook route exists yet, so nothing reads it. |
 | `GITHUB_API_URL` | No | `https://api.github.com` | The API base. |
 | `ALLOW_REPO_EXECUTION` | No | `false` | The installation-wide half of the execution consent. |
 | `EXECUTION_TIMEOUT_MS` | No | `300000` | Budget for a test command. |

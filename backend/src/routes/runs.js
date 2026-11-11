@@ -181,6 +181,7 @@ export function runRoutes({ db = getDb() } = {}) {
           no_jobs: 409,
           run_not_failed: 409,
           no_source_ref: 409,
+          github_mode_disabled: 503,
           network_error: 502,
           archive_too_large: 413,
         }[error.code] ?? 502;

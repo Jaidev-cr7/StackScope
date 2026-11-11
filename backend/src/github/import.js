@@ -32,6 +32,20 @@ export async function importWorkflowRun({ runUrl, client } = {}) {
     });
   }
 
+  // The mode is checked before anything is fetched.
+  //
+  // `replay` is the default, and it means "nothing leaves this machine". An
+  // import that quietly called the live API anyway would break that promise
+  // without saying so, so it is refused with an explanation instead. The
+  // check is skipped when a client is injected, because that is a test
+  // supplying its own transport.
+  if (!client && config.github.mode !== 'live') {
+    throw new GitHubError(
+      'GitHub imports are disabled. Set GITHUB_MODE=live to enable them, and add GITHUB_TOKEN if the repository is private.',
+      { code: 'github_mode_disabled' },
+    );
+  }
+
   const github = client ?? createGitHubClient();
   const { owner, repo, workflowRunId } = coordinates;
 
@@ -72,8 +86,16 @@ export async function importWorkflowRun({ runUrl, client } = {}) {
   const archive = await github.getSourceArchive({ owner, repo, ref });
 
   const workspace = await createWorkspace({ root: config.sandboxRoot, label: 'import' });
+  let checkoutPath;
   try {
-    await extractStreamTo(archive.streamFactory, workspace.repo, { stripTopLevel: true });
+    // The extraction lands in `<target>/repo`, so the target is the workspace
+    // root and the result is the workspace's own `repo` directory. Passing
+    // `workspace.repo` instead would put the project one level deeper than
+    // the workspace believes it is.
+    const extracted = await extractStreamTo(archive.streamFactory, workspace.root, {
+      stripTopLevel: true,
+    });
+    checkoutPath = extracted.root;
   } catch (error) {
     await removeWorkspace(config.sandboxRoot, workspace.root, { expectedId: workspace.id }).catch(() => {});
     throw error;
@@ -89,7 +111,7 @@ export async function importWorkflowRun({ runUrl, client } = {}) {
     workflowRun,
     job: failedJob,
     logText,
-    checkoutPath: workspace.repo,
+    checkoutPath,
     workspaceId: workspace.id,
   };
 }

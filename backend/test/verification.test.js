@@ -419,4 +419,101 @@ describe('the GitHub client', () => {
       client.getWorkflowRun({ owner: 'acme', repo: 'widgets', workflowRunId: '42' }),
     ).rejects.toMatchObject({ status: 404, code: 'not_found' });
   });
+
+  it('explains that a refused job log needs a token', async () => {
+    // GitHub refuses the job log without a token, even for a public
+    // repository. The message has to say that, because a bare 403 does not.
+    const fetchImpl = async () => ({ ok: false, status: 403, headers: { get: () => null } });
+    const client = createGitHubClient({ fetchImpl });
+
+    await expect(
+      client.getJobLog({ owner: 'acme', repo: 'widgets', jobId: '7' }),
+    ).rejects.toMatchObject({ status: 403, code: 'forbidden' });
+
+    await expect(
+      client.getJobLog({ owner: 'acme', repo: 'widgets', jobId: '7' }),
+    ).rejects.toThrow(/GITHUB_TOKEN/);
+  });
+});
+
+describe('the GitHub import', () => {
+  it('refuses to reach the network while the mode is replay', async () => {
+    // `replay` means "nothing leaves this machine". An import that called the
+    // API anyway would break that without saying so.
+    const { importWorkflowRun } = await import('../src/github/import.js');
+
+    await expect(
+      importWorkflowRun({ runUrl: 'https://github.com/acme/widgets/actions/runs/42' }),
+    ).rejects.toMatchObject({ code: 'github_mode_disabled' });
+  });
+
+  it('refuses a URL that is not a workflow run', async () => {
+    const { importWorkflowRun } = await import('../src/github/import.js');
+
+    await expect(
+      importWorkflowRun({ runUrl: 'https://github.com/acme/widgets' }),
+    ).rejects.toMatchObject({ code: 'invalid_run_url' });
+  });
+
+  it('imports a run: metadata, log and a validated source archive', async () => {
+    const { importWorkflowRun } = await import('../src/github/import.js');
+    const { Readable } = await import('node:stream');
+    const { create } = await import('tar');
+
+    // A real gzipped tar, so the archive goes through the same two-pass
+    // validation every other archive does.
+    const source = path.join(scratch, 'archive-source');
+    await mkdir(path.join(source, 'src'), { recursive: true });
+    await writeFile(path.join(source, 'package.json'), '{"name":"x","type":"module"}\n', 'utf8');
+    await writeFile(path.join(source, 'src', 'index.js'), 'export const x = 1;\n', 'utf8');
+
+    const chunks = [];
+    const pack = create({ gzip: true, cwd: source }, ['package.json', 'src/index.js']);
+    pack.on('data', (chunk) => chunks.push(chunk));
+    await new Promise((resolve, reject) => {
+      pack.on('end', resolve);
+      pack.on('error', reject);
+    });
+    const archive = Buffer.concat(chunks);
+
+    const client = {
+      async getWorkflowRun(coords) {
+        expect(coords).toEqual({ owner: 'acme', repo: 'widgets', workflowRunId: '42' });
+        return {
+          id: '42',
+          name: 'CI',
+          headSha: 'abc123',
+          status: 'completed',
+          conclusion: 'failure',
+          htmlUrl: 'https://github.com/acme/widgets/actions/runs/42',
+        };
+      },
+      async listJobs() {
+        return [{ id: '7', name: 'test', conclusion: 'failure', steps: [] }];
+      },
+      async getJobLog() {
+        return 'the log';
+      },
+      async getSourceArchive() {
+        return { streamFactory: () => Readable.from([archive]) };
+      },
+    };
+
+    const result = await importWorkflowRun({
+      runUrl: 'https://github.com/acme/widgets/actions/runs/42',
+      client,
+    });
+
+    expect(result.logText).toBe('the log');
+    expect(result.job.id).toBe('7');
+    expect(result.workflowRun.headSha).toBe('abc123');
+
+    // The archive was extracted into a workspace, with the top-level
+    // directory stripped.
+    const extracted = await readFile(path.join(result.checkoutPath, 'package.json'), 'utf8');
+    expect(extracted).toContain('"name":"x"');
+    expect(
+      await readFile(path.join(result.checkoutPath, 'src', 'index.js'), 'utf8'),
+    ).toContain('export const x = 1;');
+  });
 });

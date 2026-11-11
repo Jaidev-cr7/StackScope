@@ -71,10 +71,15 @@ export function createGitHubClient({ token = config.github.token, apiUrl = confi
     }
 
     if (!response.ok) {
-      throw new GitHubError(`GitHub answered ${response.status} for ${path}`, {
-        status: response.status,
-        code: response.status === 404 ? 'not_found' : 'github_error',
-      });
+      const code =
+        response.status === 404 ? 'not_found' : response.status === 403 ? 'forbidden' : 'github_error';
+      // A 403 on the log endpoint has one usual cause, and it is fixable:
+      // reading a job log needs a token even for a public repository.
+      const message =
+        code === 'forbidden' && path.includes('/logs')
+          ? 'GitHub refused the job log. Reading a job log needs a token: set GITHUB_TOKEN to a personal access token with the `actions:read` scope.'
+          : `GitHub answered ${response.status} for ${path}`;
+      throw new GitHubError(message, { status: response.status, code });
     }
 
     if (raw) return response;
@@ -129,6 +134,12 @@ export function createGitHubClient({ token = config.github.token, apiUrl = confi
      *
      * The run-level log endpoint answers with a zip archive; the job-level
      * endpoint answers with the log itself, which is what the parser wants.
+     *
+     * This is the one endpoint that needs a token. GitHub lets an anonymous
+     * caller read a run's metadata, its jobs and its source archive, but the
+     * job log is refused with a 403 - and the log is the thing the whole
+     * investigation is about. The error says so, rather than leaving the
+     * caller to work it out from a status code.
      */
     async getJobLog({ owner, repo, jobId }) {
       const response = await request(

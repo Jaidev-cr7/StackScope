@@ -28,7 +28,13 @@ beforeAll(async () => {
   const entries = await readdir(logsDir);
   for (const entry of entries.filter((f) => f.endsWith('.log'))) {
     const id = entry.replace(/\.log$/, '');
-    logs[id] = await readFile(path.join(logsDir, entry), 'utf8');
+    const raw = await readFile(path.join(logsDir, entry), 'utf8');
+    // A captured log contains the absolute path of the machine that captured
+    // it. If the project has since moved, those paths no longer match the
+    // checkout and every frame looks like it points outside the repository.
+    // Rewriting them to the current location makes the test independent of
+    // where the repository sits.
+    logs[id] = raw.split(`${FIXTURE_CHECKOUT}/`).join(`${path.join(repoRoot, 'fixtures', 'repos')}/`);
   }
 });
 

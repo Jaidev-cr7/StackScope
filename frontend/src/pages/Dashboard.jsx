@@ -11,53 +11,100 @@ import { api } from '../api/client.js';
 import StatusBadge from '../components/StatusBadge.jsx';
 import EmptyState from '../components/EmptyState.jsx';
 import Spinner from '../components/Spinner.jsx';
+import { parseRunUrl } from '../constants.js';
 import { displaySource, errorMessage, formatRelative } from '../utils/format.js';
+
+const SOURCES = [
+  { id: 'fixture', label: 'A fixture' },
+  { id: 'github', label: 'A GitHub Actions run' },
+];
 
 function NewInvestigation({ fixtures, onCreated }) {
   const queryClient = useQueryClient();
+  const [source, setSource] = useState('fixture');
   const [fixtureId, setFixtureId] = useState('');
+  const [runUrl, setRunUrl] = useState('');
   const [allowExecution, setAllowExecution] = useState(false);
 
+  // The URL is checked here as well as on the server, so the user finds out
+  // that a URL is malformed before a request is sent. The server still
+  // validates it - a client-side check is a convenience, never a control.
+  const urlProblem = runUrl && !parseRunUrl(runUrl) ? 'That is not a GitHub Actions run URL.' : null;
+  const canSubmit =
+    source === 'fixture' ? Boolean(fixtureId) : Boolean(runUrl) && !urlProblem;
+
   const createRun = useMutation({
-    mutationFn: (id) => api.post('/runs', { fixtureId: id, allowExecution }),
+    mutationFn: (payload) => api.post('/runs', { ...payload, allowExecution }),
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['runs'] });
       onCreated?.(data?.run);
     },
   });
 
+  const submit = (event) => {
+    event.preventDefault();
+    if (!canSubmit) return;
+    createRun.mutate(source === 'fixture' ? { fixtureId } : { runUrl: runUrl.trim() });
+  };
+
   return (
-    <form
-      className="stack"
-      onSubmit={(event) => {
-        event.preventDefault();
-        if (fixtureId) createRun.mutate(fixtureId);
-      }}
-    >
-      <div className="row">
-        <div className="field" style={{ flex: 1 }}>
-          <label className="field__label" htmlFor="new-run-fixture">
-            Fixture to investigate
-          </label>
-          <select
-            id="new-run-fixture"
-            className="select"
-            value={fixtureId}
-            onChange={(event) => setFixtureId(event.target.value)}
+    <form className="stack" onSubmit={submit}>
+      <div className="tabs" role="tablist" aria-label="Source">
+        {SOURCES.map((option) => (
+          <button
+            key={option.id}
+            type="button"
+            role="tab"
+            className="tab"
+            aria-selected={source === option.id}
+            onClick={() => setSource(option.id)}
           >
-            <option value="">Choose a failing project…</option>
-            {fixtures.map((fixture) => (
-              <option key={fixture.id} value={fixture.id}>
-                {fixture.title}
-              </option>
-            ))}
-          </select>
-        </div>
+            {option.label}
+          </button>
+        ))}
+      </div>
+
+      <div className="row">
+        {source === 'fixture' ? (
+          <div className="field" style={{ flex: 1 }}>
+            <label className="field__label" htmlFor="new-run-fixture">
+              Fixture to investigate
+            </label>
+            <select
+              id="new-run-fixture"
+              className="select"
+              value={fixtureId}
+              onChange={(event) => setFixtureId(event.target.value)}
+            >
+              <option value="">Choose a failing project…</option>
+              {fixtures.map((fixture) => (
+                <option key={fixture.id} value={fixture.id}>
+                  {fixture.title}
+                </option>
+              ))}
+            </select>
+          </div>
+        ) : (
+          <div className="field" style={{ flex: 1 }}>
+            <label className="field__label" htmlFor="new-run-url">
+              GitHub Actions run URL
+            </label>
+            <input
+              id="new-run-url"
+              className="input input--mono"
+              type="url"
+              placeholder="https://github.com/owner/repo/actions/runs/12345"
+              value={runUrl}
+              onChange={(event) => setRunUrl(event.target.value)}
+            />
+            {urlProblem ? <p className="field__error">{urlProblem}</p> : null}
+          </div>
+        )}
 
         <button
           type="submit"
           className="btn btn--primary"
-          disabled={!fixtureId || createRun.isPending}
+          disabled={!canSubmit || createRun.isPending}
         >
           {createRun.isPending ? 'Starting…' : 'Start investigation'}
         </button>

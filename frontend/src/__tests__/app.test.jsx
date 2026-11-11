@@ -210,6 +210,57 @@ describe('the dashboard', () => {
     });
   });
 
+  it('accepts a GitHub Actions run URL as a source', async () => {
+    const { calls } = stubBackend({
+      ...signedIn,
+      '/api/runs': (init) => {
+        if (init?.method === 'POST') {
+          return { run: { id: 'run-4', state: 'CREATED', sourceRef: 'a run' } };
+        }
+        return signedIn['/api/runs']();
+      },
+    });
+
+    renderApp({ route: '/' });
+
+    await screen.findByRole('heading', { name: 'Investigations' });
+    // The form appears once the fixtures have loaded.
+    await screen.findByLabelText('Fixture to investigate');
+    await userEvent.click(screen.getByRole('tab', { name: 'A GitHub Actions run' }));
+
+    const input = await screen.findByLabelText('GitHub Actions run URL');
+    await userEvent.type(input, 'https://github.com/acme/widgets/actions/runs/42');
+    await userEvent.click(screen.getByRole('button', { name: 'Start investigation' }));
+
+    await waitFor(() => {
+      const post = calls.find((call) => call.init?.method === 'POST');
+      expect(post).toBeDefined();
+      expect(JSON.parse(post.init.body).runUrl).toBe(
+        'https://github.com/acme/widgets/actions/runs/42',
+      );
+    });
+  });
+
+  it('refuses a URL that is not a workflow run', async () => {
+    stubBackend(signedIn);
+
+    renderApp({ route: '/' });
+
+    await screen.findByRole('heading', { name: 'Investigations' });
+    await screen.findByLabelText('Fixture to investigate');
+    await userEvent.click(screen.getByRole('tab', { name: 'A GitHub Actions run' }));
+
+    await userEvent.type(
+      await screen.findByLabelText('GitHub Actions run URL'),
+      'https://github.com/acme/widgets',
+    );
+
+    expect(
+      await screen.findByText('That is not a GitHub Actions run URL.'),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Start investigation' })).toBeDisabled();
+  });
+
   it('signs the user out', async () => {
     const { calls } = stubBackend({
       ...signedIn,

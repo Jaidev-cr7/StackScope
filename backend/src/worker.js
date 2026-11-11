@@ -115,13 +115,26 @@ export async function investigateRun(db, { runId, userId, overrides = {} }) {
       throw new Error(`No source is available for this run (source type "${sourceType}").`);
     }
 
-    workspace = await createWorkspace({ root: config.sandboxRoot, label: newWorkspaceLabel(runId) });
-    // Copy the *contents* of the source into the checkout, not the source
-    // directory itself: `fs.cp` nests a directory inside an existing
-    // destination, which would put the project one level too deep and make
-    // every path in the log stop matching.
-    for (const entry of await readdir(sourceDir, { withFileTypes: true })) {
-      await cp(path.join(sourceDir, entry.name), path.join(workspace.repo, entry.name), { recursive: true });
+    if (sourceType === 'fixture') {
+      // A fixture is copied into a fresh workspace. The *contents* of the
+      // source are copied, not the source directory itself: `fs.cp` nests a
+      // directory inside an existing destination, which would put the project
+      // one level too deep and make every path in the log stop matching.
+      workspace = await createWorkspace({ root: config.sandboxRoot, label: newWorkspaceLabel(runId) });
+      for (const entry of await readdir(sourceDir, { withFileTypes: true })) {
+        await cp(path.join(sourceDir, entry.name), path.join(workspace.repo, entry.name), { recursive: true });
+      }
+    } else {
+      // An imported run was already downloaded into a workspace by the import
+      // service. It is used where it is rather than copied into a second
+      // workspace: copying it would leave the first one behind, and it would
+      // double the disk cost of every import for nothing.
+      //
+      // The workspace root is the parent of the checkout directory, and its
+      // id is that directory's name - which is what the removal guard checks.
+      const checkout = path.resolve(sourceDir);
+      const root = path.dirname(checkout);
+      workspace = { root, repo: checkout, id: path.basename(root) };
     }
 
     runs.setCheckoutPath(db, userId, runId, workspace.repo);

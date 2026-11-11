@@ -182,15 +182,21 @@ export function llmAvailability() {
 
 export function githubAvailability() {
   const configured = Boolean(config.github.token);
+  const mode = config.github.mode;
   return {
-    mode: config.github.mode,
+    mode,
+    // A token is present. It is what makes the job log readable, and it
+    // raises the rate limit and allows private repositories.
     configured,
-    live: config.github.mode === 'live' && configured,
-    reason: !configured
-      ? 'No GITHUB_TOKEN is configured. GitHub imports can only read recorded fixtures.'
-      : config.github.mode === 'replay'
-        ? 'GITHUB_MODE=replay: GitHub responses are served from the record/replay cache.'
-        : null,
+    // The API can actually be reached. This is false in replay mode, where
+    // an import is refused rather than quietly calling GitHub.
+    live: mode === 'live',
+    reason:
+      mode === 'live'
+        ? configured
+          ? null
+          : 'GITHUB_MODE=live with no token: a run can be listed, but GitHub refuses the job log without a token, so an import cannot be analysed.'
+        : 'GITHUB_MODE=replay: GitHub imports are disabled, so nothing leaves this machine.',
   };
 }
 
