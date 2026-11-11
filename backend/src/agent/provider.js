@@ -518,24 +518,44 @@ export function parseModelAnswer(text, request = {}) {
   const citations = Array.isArray(parsed.citations)
     ? parsed.citations
         .filter((citation) => citation && typeof citation.file === 'string')
+        .slice(0, MAX_CITATIONS)
         .map((citation) => ({
-          file: citation.file,
+          file: String(citation.file).slice(0, MAX_PATH_LENGTH),
           line: Number(citation.line) || 0,
-          quote: String(citation.quote ?? ''),
-          note: String(citation.note ?? ''),
+          quote: String(citation.quote ?? '').slice(0, MAX_QUOTE_LENGTH),
+          note: String(citation.note ?? '').slice(0, MAX_TEXT_LENGTH),
         }))
     : [];
 
   return {
-    summary: parsed.summary ?? null,
-    rootCause: parsed.rootCause ?? null,
-    category: parsed.category ?? null,
-    confidence: Number(parsed.confidence) || 0,
+    summary: boundedText(parsed.summary),
+    rootCause: boundedText(parsed.rootCause),
+    category: boundedText(parsed.category, 64),
+    confidence: Math.max(0, Math.min(1, Number(parsed.confidence) || 0)),
     citations,
-    suggestedFix: parsed.suggestedFix ?? null,
+    suggestedFix: boundedText(parsed.suggestedFix),
     patch: typeof parsed.patch === 'string' && parsed.patch.trim() !== '' ? parsed.patch : null,
     producedBy: 'model',
   };
+}
+
+/**
+ * The model's own text is bounded before it is stored.
+ *
+ * The answer comes from a program, so its length is not something to trust: a
+ * long summary is stored in the run's history and shown in the UI. The bounds
+ * are generous enough for a real answer and small enough that a pathological
+ * one cannot fill the database.
+ */
+const MAX_TEXT_LENGTH = 8_000;
+const MAX_QUOTE_LENGTH = 2_000;
+const MAX_PATH_LENGTH = 1_024;
+const MAX_CITATIONS = 50;
+
+function boundedText(value, limit = MAX_TEXT_LENGTH) {
+  if (value === null || value === undefined) return null;
+  const text = String(value);
+  return text.length <= limit ? text : `${text.slice(0, limit)}…`;
 }
 
 /**

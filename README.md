@@ -1050,13 +1050,13 @@ A variable that looks like one of this application's settings but is not recogni
 
 ## 11. Testing and evaluation
 
-**309 tests**, all of which run offline.
+**314 tests**, all of which run offline.
 
 ### Running them
 
 ```bash
 npm test                  # everything
-npm run test:backend      # 232 tests
+npm run test:backend      # 237 tests
 npm run test:frontend     # 77 tests
 npm run check:all         # the tests, the fixtures, the build and the evaluation
 ```
@@ -1070,9 +1070,9 @@ npm run check:all         # the tests, the fixtures, the build and the evaluatio
 | `test/config.test.js` | 25 | The configuration: every default, every validation failure, and every production refusal — each one loaded in a child process with a controlled environment. |
 | `test/db.test.js` | 27 | Migrations, ownership scoping, the state machine, job leasing and recovery, event ordering, audit writes. |
 | `test/api.test.js` | 24 | The HTTP surface: registration, login, rate limiting, cross-user access, the SSE stream and its resume. |
-| `test/agent.test.js` | 18 | The provider: answer parsing, the replay fallback, the tool executor's containment, the loop's step budget. |
+| `test/agent.test.js` | 20 | The provider: answer parsing, the replay fallback, the tool executor's containment, the loop's step budget. |
 | `test/verification.test.js` | 22 | Diff application, the runner registry, the verification decision table, and the GitHub import — including two runs of a real test command. |
-| `test/pipeline.test.js` | 4 | The whole pipeline, end to end, ending in a `VERIFIED` patch. |
+| `test/pipeline.test.js` | 5 | The whole pipeline, end to end, ending in a `VERIFIED` patch. |
 
 Two examples of what the assertions actually say:
 

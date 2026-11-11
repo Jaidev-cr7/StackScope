@@ -208,4 +208,40 @@ describe('a run that goes all the way', () => {
     const after = await readFile(path.join(checkout, 'src', 'cart.js'), 'utf8');
     expect(after).toBe(before);
   });
+
+  it('caps the log it stores, and says how much was left out', async () => {
+    // A CI log is untrusted input and can be enormous. The analysis uses the
+    // whole thing; what is stored is capped.
+    const huge = path.join(scratch, 'huge.log');
+    await writeFile(huge, `HEAD\n${'x'.repeat(900_000)}\nTAIL\n`, 'utf8');
+
+    const checkout = path.join(scratch, 'huge', 'repo');
+    await mkdir(checkout, { recursive: true });
+    await cp(path.join(repoRoot, 'fixtures', 'repos', '01-logic-bug'), checkout, { recursive: true });
+
+    const run = runs.createRun(db, {
+      userId: user.id,
+      sourceType: 'fixture',
+      sourceRef: '01-logic-bug',
+      repository: 'fixtures/01-logic-bug',
+      state: 'CREATED',
+      allowExecution: false,
+    });
+
+    await investigateRun(db, {
+      runId: run.id,
+      userId: user.id,
+      overrides: { sourceDir: checkout, logPath: huge },
+    });
+
+    const step = db
+      .prepare('SELECT detail FROM steps WHERE run_id = ? AND kind = ?')
+      .get(run.id, 'log');
+    expect(step.detail.length).toBeLessThan(300_000);
+    expect(step.detail).toMatch(/characters omitted/);
+    // The head and the tail survive, because that is where the error and the
+    // summary are.
+    expect(step.detail.startsWith('HEAD')).toBe(true);
+    expect(step.detail.trimEnd().endsWith('TAIL')).toBe(true);
+  });
 });

@@ -57,6 +57,28 @@ function record(db, { runId, userId, kind, title, detail = null, status = 'ok', 
   return step;
 }
 
+/** The largest chunk of a log that is kept in the run's history. */
+const MAX_STORED_LOG_BYTES = 256 * 1024;
+
+/**
+ * Cap what is stored, keeping the head and the tail.
+ *
+ * The head has the failure's header and the tail has the summary; the middle
+ * is the build output nobody reads.
+ */
+function capForStorage(text) {
+  const value = String(text ?? '');
+  if (value.length <= MAX_STORED_LOG_BYTES) return value;
+
+  const half = Math.floor(MAX_STORED_LOG_BYTES / 2);
+  const removed = value.length - MAX_STORED_LOG_BYTES;
+  return [
+    value.slice(0, half),
+    `\n[... ${removed} characters omitted from the stored copy; the analysis used the whole log ...]\n`,
+    value.slice(value.length - half),
+  ].join('');
+}
+
 /** The first step of a given kind, in order. */
 function findStep(db, runId, kind) {
   return (
@@ -179,7 +201,11 @@ export async function investigateRun(db, { runId, userId, overrides = {} }) {
       userId,
       kind: 'log',
       title: 'CI log loaded',
-      detail: logText,
+      // The log is untrusted input and it can be enormous - a CI log with a
+      // verbose build is tens of megabytes. The analysis uses the whole thing;
+      // what is *stored* is capped, because a run's history is not the place
+      // to keep an unbounded amount of somebody else's output.
+      detail: capForStorage(logText),
       eventType: 'log.ready',
       payload: { bytes: logText.length },
     });

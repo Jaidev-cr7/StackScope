@@ -52,6 +52,35 @@ describe('parseModelAnswer', () => {
     expect(answer.citations).toHaveLength(1);
   });
 
+  it('bounds the model\'s own text before it is stored', () => {
+    // The answer comes from a program, so its length is not something to
+    // trust: it ends up in the run's history and in the UI.
+    const answer = parseModelAnswer(
+      JSON.stringify({
+        summary: 'x'.repeat(50_000),
+        rootCause: 'y'.repeat(50_000),
+        citations: Array.from({ length: 200 }, (_, index) => ({
+          file: `src/file-${index}.js`,
+          line: 1,
+          quote: 'z'.repeat(10_000),
+          note: 'w'.repeat(10_000),
+        })),
+      }),
+    );
+
+    expect(answer.summary.length).toBeLessThan(9_000);
+    expect(answer.rootCause.length).toBeLessThan(9_000);
+    expect(answer.citations.length).toBeLessThanOrEqual(50);
+    expect(answer.citations[0].quote.length).toBeLessThan(3_000);
+    expect(answer.citations[0].note.length).toBeLessThan(9_000);
+  });
+
+  it('keeps the confidence within its range', () => {
+    expect(parseModelAnswer(JSON.stringify({ confidence: 5 })).confidence).toBe(1);
+    expect(parseModelAnswer(JSON.stringify({ confidence: -2 })).confidence).toBe(0);
+    expect(parseModelAnswer(JSON.stringify({ confidence: 'abc' })).confidence).toBe(0);
+  });
+
   it('reads a JSON answer wrapped in a code fence', () => {
     const answer = parseModelAnswer('```json\n{"summary":"fenced"}\n```');
     expect(answer.summary).toBe('fenced');
