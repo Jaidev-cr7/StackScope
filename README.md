@@ -1150,7 +1150,19 @@ Every request body is validated with zod before it reaches a handler, and the bo
 
 ### Archive extraction
 
-Two passes. The first validates every entry — path length, absolute paths, `..` segments, resolved escapes, depth, symlinks, entry type, per-file size and total decompressed size — and writes nothing. The decompressed size is measured on the gunzip stream, so a decompression bomb is aborted mid-flight. The second pass extracts, writing only the entries that passed.
+Two passes. The first validates every entry — path length, absolute paths, `..` segments, resolved escapes, depth, entry type, per-file size and total decompressed size — and writes nothing. The decompressed size is measured on the gunzip stream, so a decompression bomb is aborted mid-flight. The second pass extracts, writing only the entries that passed.
+
+Links are checked rather than blanket-refused. A link whose target resolves outside the checkout is rejected (`LINK_ESCAPE`), because it would let a later read or write escape the sandbox. A link whose target stays inside is allowed, because real repositories use them — a monorepo sharing a package, a test fixture pointing at another fixture — and refusing every one of them would make the integration useless without making it any safer.
+
+### Configuration safety
+
+The environment is validated once, at startup, and the production requirements are refusals rather than warnings: a missing, placeholder or short `JWT_SECRET`; a `FRONTEND_ORIGIN` still pointing at the development server; live model mode without a key; live GitHub mode without a token; and repository execution enabled with no container runtime available.
+
+A mistyped variable is a startup error too. Zod strips unknown keys, which is what makes it usable against `process.env` at all, but it meant `JWT_SECRETS` and `ALLOW_REPO_EXECTUTION` were accepted and ignored — a mistyped secret or a mistyped execution flag is worth failing over. The variables that CI systems set are excluded from that check.
+
+### Filesystem permissions
+
+The database directory is created with mode `0700` and the database file with `0600`, including the write-ahead log beside it. The database holds password hashes and the run history, and SQLite creates its file with the process umask — which is `0644` by default. The disposable checkouts are `0700` for the same reason.
 
 ### Secret redaction
 
@@ -1163,6 +1175,8 @@ CI output is untrusted input. The frontend renders it as text nodes; there is no
 ### Execution boundaries
 
 Running a checkout means running third-party code, so it is gated twice — `ALLOW_REPO_EXECUTION` for the installation and a consent flag on the run — and it is contained three ways: a disposable workspace created with mode `0700` and removed by id, an argv array spawned with `shell: false` and a scrubbed environment, and a container with no network, a read-only root filesystem and every capability dropped. The result records which of the two runners produced it.
+
+In production the container is not optional. The local fallback contains the paths a checkout can reach but not the process it can start, so a deployment with execution enabled and no container runtime refuses to start rather than running untrusted code on the host.
 
 ### Audit trail
 

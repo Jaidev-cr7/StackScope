@@ -8,7 +8,7 @@
 // write. `foreign_keys` is on because SQLite defaults it OFF, which would make
 // every ON DELETE CASCADE in the schema decorative.
 import Database from 'better-sqlite3';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, chmodSync } from 'node:fs';
 import path from 'node:path';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
@@ -28,6 +28,21 @@ export function openDatabase({ file = config.databasePath, readonly = false, mig
   // holds the write lock.
   db.pragma('busy_timeout = 5000');
   db.pragma('synchronous = NORMAL');
+
+  // The database holds password hashes and the run history, and SQLite creates
+  // the file with the process umask - which is 0644 by default. The directory
+  // is already 0700, so the file is not reachable through it, but a deployment
+  // that mounts the directory elsewhere would expose it.
+  if (!readonly && file !== ':memory:') {
+    for (const suffix of ['', '-wal', '-shm']) {
+      try {
+        chmodSync(`${file}${suffix}`, 0o600);
+      } catch {
+        // The file may not exist yet, and a read-only filesystem is not a
+        // reason to refuse to start.
+      }
+    }
+  }
 
   if (shouldMigrate) migrate(db, { log: logger });
 
